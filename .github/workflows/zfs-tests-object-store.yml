@@ -56,10 +56,10 @@ jobs:
                    -v /tmp/config:/root/.minio \
                    minio/minio server /data
 
-        export AWS_ACCESS_KEY_ID=minioadmin && export AWS_SECRET_ACCESS_KEY=minioadmin && export AWS_EC2_METADATA_DISABLED=true
-
+        export AWS_EC2_METADATA_DISABLED=true
         aws configure set aws_access_key_id minioadmin && aws configure set aws_secret_access_key minioadmin
         aws --endpoint-url http://127.0.0.1:9000/ s3 mb s3://testbucket
+        sudo cp -r $HOME/.aws /root
     - name: Tests
       run: |
         /usr/share/zfs/zfs-tests.sh -v -s 3G -r object_store
@@ -75,6 +75,7 @@ jobs:
         RESULTS_PATH=$(readlink -f /var/tmp/test_results/current)
         sudo dmesg > $RESULTS_PATH/dmesg
         sudo cp /var/log/syslog $RESULTS_PATH/
+        sudo tar czvf $RESULTS_PATH/zoa_logs.tgz /var/log/zoa
         sudo chmod +r $RESULTS_PATH/*
         # Replace ':' in dir names, actions/upload-artifact doesn't support it
         for f in $(find $RESULTS_PATH -name '*:*'); do mv "$f" "${f//:/__}"; done

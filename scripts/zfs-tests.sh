@@ -48,8 +48,13 @@ ITERATIONS=1
 ZFS_DBGMSG="$STF_SUITE/callbacks/zfs_dbgmsg.ksh"
 ZFS_DMESG="$STF_SUITE/callbacks/zfs_dmesg.ksh"
 UNAME=$(uname -s)
-ZOA_LOG="/var/zoa.log"
-ZOA_OUTPUT="/var/zoa.stdout"
+ZOA_LOG="/var/tmp/zoa.log"
+ZOA_OUTPUT="/var/tmp/zoa.stdout"
+ZOA_CONF="/etc/zfs/zoa.conf"
+ZOA_CONFIG="/etc/zfs/zoa_config.toml"
+HAS_ZOA_SERVICE="$(systemctl list-unit-files 2>/dev/null | \
+    awk '/^zfs-object-agent/ {found=1}
+    END{if(found) print "true"; else print "false"}')"
 
 # Override some defaults if on FreeBSD
 if [ "$UNAME" = "FreeBSD" ] ; then
@@ -357,6 +362,24 @@ $0 -x
 EOF
 }
 
+# Take a Zettacache device as either an absolute or relative path and
+# return the /dev/disk/by-id name for the cache partition.
+get_cache_part() {
+	devname="$(basename "$1")"
+
+	[ -z "$devname" ] && fail "Missing argument"
+
+	devname="${devname}p2"
+	udevadm settle -E "/dev/disk/by-id/$devname"
+	# shellcheck disable=SC2012
+	cache_part=$(ls -l /dev/disk/by-id 2>/dev/null | \
+	    awk "/$devname/ {print \$9; exit}" 2>/dev/null)
+
+	[ -z "$cache_part" ] && fail "Could not find cache partition for $devname"
+
+	echo "/dev/disk/by-id/$cache_part"
+}
+
 while getopts 'hvqxkfScn:d:s:r:?t:T:u:I:' OPTION; do
 	case $OPTION in
 	h)
@@ -595,24 +618,35 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 	[ -n "$ZTS_REGION" ] || fail "ZTS_REGION is unset."
 	[ -n "$ZTS_CREDS_PROFILE" ] || export ZTS_CREDS_PROFILE=default
 
+	#
 	# Set RUST_BACKTRACE environment variable to generate proper stack
 	# traces for zfs_object_agent service crash.
 	#
 	export RUST_BACKTRACE=1
 
-	#
-	# Start zfs_object_agent service and redirect the output to ZOA_LOG
-	# file.
-	#
-	if [ -n "$ZETTA_CACHE_DEV" ]; then
-		dev=$(basename "$ZETTA_CACHE_DEV")
-		sudo -E /sbin/zfs_object_agent -vv -c "/dev/${dev}" \
-			--output-file=$ZOA_LOG 2>&1 | \
-			sudo tee $ZOA_OUTPUT > /dev/null &
+	if [ -n "$ZETTACACHE_DEVICE" ]; then
+		# Dedicate 8G at the start of the zettacache disk for a slog.
+		printf "size=16777216, bootable\n," | \
+		    sudo sfdisk --wipe always \
+		    "/dev/$(basename "$ZETTACACHE_DEVICE")"
+		cache_part="$(get_cache_part "$ZETTACACHE_DEVICE")"
+		sudo -E sed -i 's/ZETTACACHE_DEVICE=.*//g' $ZOA_CONF
+		sudo sh -c "echo ZETTACACHE_DEVICE=$cache_part >>$ZOA_CONF"
 	else
-		sudo -E /sbin/zfs_object_agent -vv \
-			--output-file=$ZOA_LOG 2>&1 | \
-			sudo tee $ZOA_OUTPUT > /dev/null &
+		sudo -E sed -i 's/ZETTACACHE_DEVICE=.*/ZETTACACHE_DEVICE=/g' \
+		    $ZOA_CONF
+	fi
+
+	#
+	# Start zfs_object_agent using the service if available, otherwise
+	# start it manually.
+	#
+	if $HAS_ZOA_SERVICE; then
+		sudo systemctl restart zfs-object-agent
+	else
+		sudo -E /sbin/zfs_object_agent -vv -t $ZOA_CONFIG \
+		    --output-file=$ZOA_LOG 2>&1 | \
+		    sudo tee $ZOA_OUTPUT > /dev/null &
 	fi
 
 	# Verify connectivity before proceeding
@@ -712,7 +746,7 @@ msg "STACK_TRACER:    $STACK_TRACER"
 msg "Keep pool(s):    $KEEP"
 msg "Missing util(s): $STF_MISSING_BIN"
 msg "ZTS_OBJECT_STORE:      $ZTS_OBJECT_STORE"
-msg "ZETTA_CACHE_DEV:       $ZETTA_CACHE_DEV"
+msg "ZETTACACHE_DEVICE:     $ZETTACACHE_DEVICE"
 msg "RUST_BACKTRACE:        $RUST_BACKTRACE"
 msg ""
 

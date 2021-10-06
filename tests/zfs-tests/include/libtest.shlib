@@ -21,7 +21,7 @@
 
 #
 # Copyright (c) 2009, Sun Microsystems Inc. All rights reserved.
-# Copyright (c) 2012, 2020, Delphix. All rights reserved.
+# Copyright (c) 2012, 2021, Delphix. All rights reserved.
 # Copyright (c) 2017, Tim Chase. All rights reserved.
 # Copyright (c) 2017, Nexenta Systems Inc. All rights reserved.
 # Copyright (c) 2017, Lawrence Livermore National Security LLC.
@@ -1764,6 +1764,26 @@ function verify_runnable # zone limit
 	return 0
 }
 
+# Take a Zettacache device as either an absolute or relative path and
+# return the /dev/disk/by-id name for the slog partition.
+get_slog_part() {
+	typeset devname="$(basename "$1")"
+	typeset slog_part=""
+
+	[[ -z "$devname" ]] && fail "Missing argument"
+
+	devname="${devname}p1"
+	udevadm settle -E "/dev/disk/by-id/$devname"
+	# shellcheck disable=SC2012
+	slog_part=$(ls -l /dev/disk/by-id 2>/dev/null | \
+	    awk "/$devname/ {print \$9; exit}" 2>/dev/null)
+
+	[[ -z "$slog_part" ]] && \
+	    fail "Could not find log partition for $devname"
+
+	echo "/dev/disk/by-id/$slog_part"
+}
+
 # Return 0 if create successfully or the pool exists; $? otherwise
 # Note: In local zones, this function should return 0 silently.
 #
@@ -1820,9 +1840,17 @@ function create_pool
 	fi
 
 	log_note $zpool_create_cmd
-	$zpool_create_cmd
+	$zpool_create_cmd || return $?
 
-	return $?
+	# If a Zettacache device was specified, it has been partitioned to
+	# also contain a partition for a slog. Add it here.
+	if [[ -n $ZETTACACHE_DEVICE ]]; then
+		typeset log_dev=$(get_slog_part $ZETTACACHE_DEVICE)
+		zpool add $pool log $log_dev
+		return $?
+	fi
+
+	return 0
 }
 
 # Return 0 if import completes successfully; $? otherwise
