@@ -19,6 +19,7 @@ use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::Read;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use zettacache::base_types::*;
@@ -387,7 +388,7 @@ fn get_object_access(
     profile: &str,
     aws_access_key_id: Option<&str>,
     aws_secret_access_key: Option<&str>,
-) -> ObjectAccess {
+) -> Arc<ObjectAccess> {
     match aws_access_key_id {
         None => ObjectAccess::new(endpoint, region, bucket, Some(profile.to_owned()), false),
         Some(access_id) => {
@@ -524,7 +525,7 @@ async fn main() {
         endpoint, region_str, bucket_name, profile, aws_access_key_id, aws_secret_access_key
     );
 
-    let object_access: ObjectAccess = get_object_access(
+    let object_access = get_object_access(
         endpoint,
         region_str,
         bucket_name,

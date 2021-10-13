@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::process;
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::fs;
 use tokio::fs::OpenOptions;
@@ -326,37 +327,37 @@ impl PoolDestroyer {
 }
 
 fn delete_pool_objects(
-    object_access: &ObjectAccess,
+    object_access: Arc<ObjectAccess>,
     guid: PoolGuid,
-    sender: tokio::sync::mpsc::UnboundedSender<usize>,
+    sender: mpsc::UnboundedSender<usize>,
 ) {
-    let oa: ObjectAccess = object_access.clone();
-
     tokio::spawn(async move {
         let prefix = format!("zfs/{}/", guid);
         let super_object = PoolPhys::key(guid);
         let batch_size = *OBJECT_DELETION_BATCH_SIZE * *DESTROY_PROGRESS_FREQUENCY;
         let mut count = 0;
 
-        oa.delete_objects(
-            oa.list_objects(prefix, None, false)
-                // Skip the super object as we use it to track the progress made by this task.
-                .filter(|o| futures::future::ready(super_object.ne(o)))
-                .inspect(|_| {
-                    // Note: We are counting the objects listed rather than the objects deleted.
-                    // This works as we are fine with not being very accurate.
-                    count += 1;
-                    if count >= batch_size {
-                        sender.send(count).unwrap();
-                        count = 0;
-                    }
-                }),
-        )
-        .await;
+        object_access
+            .delete_objects(
+                object_access
+                    .list_objects(prefix, None, false)
+                    // Skip the super object as we use it to track the progress made by this task.
+                    .filter(|o| futures::future::ready(super_object.ne(o)))
+                    .inspect(|_| {
+                        // Note: We are counting the objects listed rather than the objects deleted.
+                        // This works as we are fine with not being very accurate.
+                        count += 1;
+                        if count >= batch_size {
+                            sender.send(count).unwrap();
+                            count = 0;
+                        }
+                    }),
+            )
+            .await;
     });
 }
 
-async fn destroy_task(object_access: ObjectAccess, guid: PoolGuid) {
+async fn destroy_task(object_access: Arc<ObjectAccess>, guid: PoolGuid) {
     info!("destroying pool {}", guid);
 
     // There can only be one destroy task for any given pool and
@@ -373,7 +374,7 @@ async fn destroy_task(object_access: ObjectAccess, guid: PoolGuid) {
         .destroying_phys = pool_phys.destroying_state;
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    delete_pool_objects(&object_access, guid, tx);
+    delete_pool_objects(object_access.clone(), guid, tx);
 
     // Wait for the delete_prefix task to send progress updates.
     while let Some(object_count) = rx.recv().await {
@@ -405,14 +406,18 @@ async fn destroy_task(object_access: ObjectAccess, guid: PoolGuid) {
     pool_destroyer.write().await.unwrap();
 }
 
-fn start_destroy_task(object_access: ObjectAccess, guid: PoolGuid) {
+fn start_destroy_task(object_access: Arc<ObjectAccess>, guid: PoolGuid) {
     tokio::spawn(async move {
         destroy_task(object_access, guid).await;
     });
 }
 
 /// Mark a pool as destroyed and start destroying it in the background.
-pub async fn destroy_pool(object_access: ObjectAccess, guid: PoolGuid, total_data_objects: u64) {
+pub async fn destroy_pool(
+    object_access: Arc<ObjectAccess>,
+    guid: PoolGuid,
+    total_data_objects: u64,
+) {
     let mut maybe_pool_destroyer = POOL_DESTROYER.lock().await;
     let pool_destroyer = maybe_pool_destroyer.as_mut().unwrap();
     pool_destroyer
@@ -426,7 +431,7 @@ pub async fn destroy_pool(object_access: ObjectAccess, guid: PoolGuid, total_dat
 }
 
 /// Resume destroying a pool that was previously marked for destroying.
-pub async fn resume_destroy(object_access: ObjectAccess, guid: PoolGuid) -> Result<()> {
+pub async fn resume_destroy(object_access: Arc<ObjectAccess>, guid: PoolGuid) -> Result<()> {
     // Fail the request if resumption of deletion is being requested on a pool that is not in destroyed state.
     let mut maybe_pool_destroyer = POOL_DESTROYER.lock().await;
     let pool_destroyer = maybe_pool_destroyer.as_mut().unwrap();

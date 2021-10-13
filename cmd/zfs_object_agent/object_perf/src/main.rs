@@ -124,7 +124,7 @@ async fn main() {
         endpoint, region_str, bucket_name, profile
     );
 
-    let object_access: ObjectAccess = ObjectAccess::new(
+    let object_access = ObjectAccess::new(
         endpoint,
         region_str,
         bucket_name,
@@ -136,12 +136,12 @@ async fn main() {
     println!("Using prefix: '{}'", key_prefix);
     match matches.subcommand() {
         ("write", Some(_matches)) => {
-            s3perf::write_test(&object_access, key_prefix, objsize_bytes, qdepth, duration)
+            s3perf::write_test(object_access, key_prefix, objsize_bytes, qdepth, duration)
                 .await
                 .unwrap();
         }
         ("read", Some(_matches)) => {
-            s3perf::read_test(&object_access, key_prefix, objsize_bytes, qdepth, duration)
+            s3perf::read_test(object_access, key_prefix, objsize_bytes, qdepth, duration)
                 .await
                 .unwrap();
         }

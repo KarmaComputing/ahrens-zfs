@@ -79,7 +79,7 @@ lazy_static! {
         Default::default();
 }
 
-pub async fn start_heartbeat(object_access: ObjectAccess, id: Uuid) -> HeartbeatGuard {
+pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> HeartbeatGuard {
     let key = HeartbeatImpl {
         endpoint: object_access.endpoint(),
         region: object_access.region(),

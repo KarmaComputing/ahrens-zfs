@@ -81,7 +81,7 @@ impl RootConnectionState {
         server.register_handler("resume destroy pool", Box::new(Self::resume_destroy_pool));
     }
 
-    fn get_object_access(nvl: &NvListRef) -> Result<ObjectAccess> {
+    fn get_object_access(nvl: &NvListRef) -> Result<Arc<ObjectAccess>> {
         let bucket_name = nvl.lookup_string("bucket")?;
         let region_str = nvl.lookup_string("region")?;
         let endpoint = nvl.lookup_string("endpoint")?;
@@ -128,7 +128,7 @@ impl RootConnectionState {
             let txg = nvl.lookup_uint64("TXG").ok().map(Txg);
 
             let (pool, phys_opt, next_block) =
-                match Pool::open(&object_access, guid, txg, cache, self.id, resume).await {
+                match Pool::open(object_access, guid, txg, cache, self.id, resume).await {
                     Err(PoolOpenError::Mmp(hostname)) => {
                         let mut response = NvList::new_unique_names();
                         response.insert("Type", "pool open failed").unwrap();

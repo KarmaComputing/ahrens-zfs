@@ -54,7 +54,7 @@ impl Perf {
 
     async fn read_objects(
         &self,
-        object_access: &ObjectAccess,
+        object_access: Arc<ObjectAccess>,
         key_prefix: String,
         qdepth: u64,
         duration: Duration,
@@ -87,7 +87,7 @@ impl Perf {
 
     async fn write_objects(
         &self,
-        object_access: &ObjectAccess,
+        object_access: Arc<ObjectAccess>,
         key_prefix: String,
         objsize: u64,
         qdepth: u64,
@@ -96,7 +96,7 @@ impl Perf {
         let data = vec![0; objsize.try_into().unwrap()];
         let mut key_id: u64 = 0;
         let start = Instant::now();
-        let put_lambda = || {
+        let put_stream = stream::repeat_with(|| {
             let my_data = data.clone();
             let my_perf = self.clone();
             let my_object_access = object_access.clone();
@@ -111,8 +111,7 @@ impl Perf {
                     )
                     .await
             })
-        };
-        let put_stream = stream::repeat_with(put_lambda);
+        });
 
         match bounds {
             WriteTestBounds::Time(duration) => {
@@ -134,7 +133,7 @@ impl Perf {
 }
 
 pub async fn write_test(
-    object_access: &ObjectAccess,
+    object_access: Arc<ObjectAccess>,
     key_prefix: String,
     objsize: u64,
     qdepth: u64,
@@ -144,8 +143,14 @@ pub async fn write_test(
     let bounds = WriteTestBounds::Time(duration);
     perf.log_metrics(Duration::from_secs(1));
 
-    perf.write_objects(object_access, key_prefix.clone(), objsize, qdepth, bounds)
-        .await;
+    perf.write_objects(
+        object_access.clone(),
+        key_prefix.clone(),
+        objsize,
+        qdepth,
+        bounds,
+    )
+    .await;
 
     println!("{:#?}", perf.metrics.put);
 
@@ -157,7 +162,7 @@ pub async fn write_test(
 }
 
 pub async fn read_test(
-    object_access: &ObjectAccess,
+    object_access: Arc<ObjectAccess>,
     key_prefix: String,
     objsize: u64,
     qdepth: u64,
@@ -167,10 +172,16 @@ pub async fn read_test(
     let bounds = WriteTestBounds::Objects(max(qdepth * 10, 200));
     perf.log_metrics(Duration::from_secs(1));
 
-    perf.write_objects(object_access, key_prefix.clone(), objsize, qdepth, bounds)
-        .await;
+    perf.write_objects(
+        object_access.clone(),
+        key_prefix.clone(),
+        objsize,
+        qdepth,
+        bounds,
+    )
+    .await;
 
-    perf.read_objects(object_access, key_prefix.clone(), qdepth, duration)
+    perf.read_objects(object_access.clone(), key_prefix.clone(), qdepth, duration)
         .await;
 
     println!("{:#?}", perf.metrics.get);

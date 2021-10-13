@@ -52,7 +52,6 @@ lazy_static! {
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
 }
 
-#[derive(Clone)]
 pub struct ObjectAccess {
     client: rusoto_s3::S3Client,
     bucket_str: String,
@@ -185,15 +184,19 @@ impl ObjectAccess {
         rusoto_s3::S3Client::new_with(http_client, creds, region)
     }
 
-    pub fn get_client(endpoint: &str, region_str: &str, profile: Option<String>) -> S3Client {
+    pub fn get_client(
+        endpoint: &str,
+        region_str: &str,
+        credentials_profile: Option<String>,
+    ) -> S3Client {
         info!("region: {}", region_str);
         info!("Endpoint: {}", endpoint);
-        info!("Profile: {:?}", profile);
+        info!("Profile: {:?}", credentials_profile);
 
         let auto_refreshing_provider =
             AutoRefreshingProvider::new(ChainProvider::with_profile_provider(
                 ProfileProvider::with_default_credentials(
-                    profile.unwrap_or_else(|| "default".to_owned()),
+                    credentials_profile.unwrap_or_else(|| "default".to_owned()),
                 )
                 .unwrap(),
             ))
@@ -210,39 +213,32 @@ impl ObjectAccess {
         readonly: bool,
         endpoint: &str,
         region: &str,
-    ) -> Self {
-        ObjectAccess {
+    ) -> Arc<Self> {
+        Arc::new(ObjectAccess {
             client,
             bucket_str: bucket.to_string(),
             readonly,
             region_str: region.to_string(),
             endpoint_str: endpoint.to_string(),
             credentials_profile: None,
-        }
+        })
     }
 
     pub fn new(
         endpoint: &str,
         region_str: &str,
         bucket: &str,
-        profile: Option<String>,
+        credentials_profile: Option<String>,
         readonly: bool,
-    ) -> Self {
-        let credentials_profile = profile.clone();
-        let client = ObjectAccess::get_client(endpoint, region_str, profile);
-
-        ObjectAccess {
-            client,
+    ) -> Arc<Self> {
+        Arc::new(ObjectAccess {
+            client: ObjectAccess::get_client(endpoint, region_str, credentials_profile.clone()),
             bucket_str: bucket.to_string(),
             readonly,
             region_str: region_str.to_string(),
             endpoint_str: endpoint.to_string(),
             credentials_profile,
-        }
-    }
-
-    pub fn release_client(self) -> S3Client {
-        self.client
+        })
     }
 
     pub async fn get_object_impl(&self, key: String, timeout: Option<Duration>) -> Result<Vec<u8>> {

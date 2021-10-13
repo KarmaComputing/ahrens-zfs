@@ -554,9 +554,8 @@ impl PendingObjectState {
  * Note: this struct is passed to the OBL code.  It needs to be a separate struct from Pool,
  * because it can't refer back to the OBL itself, which would create a circular reference.
  */
-#[derive(Clone)]
 pub struct PoolSharedState {
-    pub object_access: ObjectAccess,
+    pub object_access: Arc<ObjectAccess>,
     pub guid: PoolGuid,
     pub name: String,
 }
@@ -796,7 +795,7 @@ impl Pool {
     }
 
     async fn open_from_txg(
-        object_access: &ObjectAccess,
+        object_access: Arc<ObjectAccess>,
         pool_phys: &PoolPhys,
         txg: Txg,
         cache: Option<ZettaCache>,
@@ -804,7 +803,7 @@ impl Pool {
         readonly: bool,
         resuming: bool,
     ) -> Result<(Pool, UberblockPhys, BlockId), PoolOpenError> {
-        let phys = UberblockPhys::get(object_access, pool_phys.guid, txg).await?;
+        let phys = UberblockPhys::get(&object_access, pool_phys.guid, txg).await?;
 
         features::check_features(phys.features.iter().map(|(f, _)| f), readonly)?;
 
@@ -888,14 +887,14 @@ impl Pool {
     }
 
     pub async fn open(
-        object_access: &ObjectAccess,
+        object_access: Arc<ObjectAccess>,
         guid: PoolGuid,
         txg: Option<Txg>,
         cache: Option<ZettaCache>,
         id: Uuid,
         resuming: bool,
     ) -> Result<(Pool, Option<UberblockPhys>, BlockId), PoolOpenError> {
-        let phys = PoolPhys::get(object_access, guid).await?;
+        let phys = PoolPhys::get(&object_access, guid).await?;
         if phys.last_txg.0 == 0 {
             let shared_state = Arc::new(PoolSharedState {
                 object_access: object_access.clone(),
@@ -958,8 +957,11 @@ impl Pool {
                     zettacache: cache,
                     object_block_map,
                     resuming: rx,
-                    _heartbeat_guard: if !object_access.readonly() {
-                        Some(heartbeat::start_heartbeat(object_access.clone(), id).await)
+                    _heartbeat_guard: if !shared_state.object_access.readonly() {
+                        Some(
+                            heartbeat::start_heartbeat(shared_state.object_access.clone(), id)
+                                .await,
+                        )
                     } else {
                         None
                     },
@@ -972,7 +974,7 @@ impl Pool {
             pool.claim(id).await.map(|_| (pool, None, next_block))
         } else {
             let (mut pool, ub, next_block) = Pool::open_from_txg(
-                object_access,
+                object_access.clone(),
                 &phys,
                 txg.unwrap_or(phys.last_txg),
                 cache,
@@ -999,7 +1001,7 @@ impl Pool {
                     // that if we re-open the pool we don't try to use the
                     // future (deleted) TXG.
                     let new_phys = PoolPhys { last_txg, ..phys };
-                    new_phys.put(object_access).await;
+                    new_phys.put(&object_access).await;
                 }
 
                 // Clean up obsolete DataObject's before the next txg completes.
