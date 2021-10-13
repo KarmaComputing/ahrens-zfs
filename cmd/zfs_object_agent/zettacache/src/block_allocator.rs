@@ -1319,9 +1319,9 @@ impl BlockAllocatorPhys {
 }
 
 pub async fn zcachedb_dump_spacemaps(
+    phys: BlockAllocatorPhys,
     block_access: Arc<BlockAccess>,
     extent_allocator: Arc<ExtentAllocator>,
-    phys: BlockAllocatorPhys,
 ) {
     println!("DUMP SPACEMAP");
     println!("{:?}", phys.spacemap);

@@ -26,7 +26,7 @@ async fn main() {
                 .required(true),
         )
         .subcommand(
-            SubCommand::with_name("dump_structures")
+            SubCommand::with_name("dump-structures")
                 .about("print out on-disk structures")
                 .arg(
                     Arg::with_name("nodefaults")
@@ -39,18 +39,24 @@ async fn main() {
                         .long("spacemaps")
                         .short("s")
                         .help("dump block allocator spacemaps"),
+                )
+                .arg(
+                    Arg::with_name("operation-log-raw")
+                        .long("operation-log-raw")
+                        .help("dump operation log"),
                 ),
         )
         .get_matches();
 
     let device = matches.value_of("device").unwrap();
     match matches.subcommand() {
-        ("dump_structures", Some(subcommand_matches)) => {
+        ("dump-structures", Some(subcommand_matches)) => {
             ZettaCacheDBCommand::issue_command(
                 ZettaCacheDBCommand::DumpStructures(
                     DumpStructuresOptions::default()
                         .defaults(!subcommand_matches.is_present("nodefaults"))
-                        .spacemaps(subcommand_matches.is_present("spacemaps")),
+                        .spacemaps(subcommand_matches.is_present("spacemaps"))
+                        .operation_log_raw(subcommand_matches.is_present("operation-log-raw")),
                 ),
                 device,
             )

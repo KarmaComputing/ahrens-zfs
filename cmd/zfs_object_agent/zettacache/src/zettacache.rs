@@ -602,7 +602,21 @@ impl ZettaCache {
         let extent_allocator = Arc::new(ExtentAllocator::open(&checkpoint.extent_allocator));
 
         if opts.dump_spacemaps {
-            zcachedb_dump_spacemaps(block_access, extent_allocator, checkpoint.block_allocator)
+            zcachedb_dump_spacemaps(
+                checkpoint.block_allocator,
+                block_access.clone(),
+                extent_allocator.clone(),
+            )
+            .await;
+        }
+
+        if opts.dump_operation_log_raw {
+            checkpoint
+                .operation_log
+                .iter_chunks(block_access)
+                .for_each(|chunk| async move {
+                    println!("{:#?}", chunk);
+                })
                 .await;
         }
     }

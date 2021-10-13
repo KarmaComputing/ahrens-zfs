@@ -65,6 +65,66 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         }
         *self = Default::default();
     }
+
+    pub fn iter_chunks(
+        &self,
+        block_access: Arc<BlockAccess>,
+    ) -> impl Stream<Item = BlockBasedLogChunk<T>> {
+        // XXX is it possible to do this without copying self.phys.extents?  Not
+        // a huge deal I guess since it should be small.
+        let extents = self.extents.clone();
+        let next_chunk = self.next_chunk;
+        let next_chunk_offset = self.next_chunk_offset;
+
+        stream! {
+            let mut chunk_id = ChunkId(0);
+            for (offset, extent) in extents.iter() {
+                // XXX Probably want to do smaller i/os than the entire extent
+                // (which is up to 128MB).  Also want to issue a few in
+                // parallel?
+
+                let truncated_extent =
+                    extent.range(0, min(extent.size, (next_chunk_offset - *offset)));
+                let extent_bytes = block_access.read_raw(truncated_extent).await;
+                let mut total_consumed = 0;
+                while total_consumed < extent_bytes.len() {
+                    let chunk_location = DiskLocation {
+                        offset: extent.location.offset + total_consumed as u64,
+                    };
+                    trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
+                    // XXX handle checksum error here
+                    let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
+                        .chunk_from_raw(&extent_bytes[total_consumed..])
+                        .with_context(|| format!("{:?} at {:?}", chunk_id, chunk_location))
+                        .unwrap();
+                    assert_eq!(chunk.id, chunk_id);
+                    yield chunk;
+                    chunk_id = chunk_id.next();
+                    total_consumed += consumed;
+                    if chunk_id == next_chunk {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
+        let stream = self.iter_chunks(block_access);
+        let phys_entries = self.num_entries;
+
+        stream! {
+            let mut num_entries = 0;
+            for await chunk in stream {
+                for entry in chunk.entries {
+                    yield entry;
+                    num_entries += 1;
+                }
+            };
+
+            assert_eq!(phys_entries, num_entries);
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -113,7 +173,7 @@ pub struct BlockBasedLogWithSummary<T: BlockBasedLogEntry> {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct BlockBasedLogChunk<T: BlockBasedLogEntry> {
+pub struct BlockBasedLogChunk<T: BlockBasedLogEntry> {
     id: ChunkId,
     offset: LogOffset,
     #[serde(bound(deserialize = "Vec<T>: DeserializeOwned"))]
@@ -256,47 +316,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
         assert!(self.pending_entries.is_empty());
-        // XXX is it possible to do this without copying self.phys.extents?  Not
-        // a huge deal I guess since it should be small.
-        let phys = self.phys.clone();
-        let block_access = self.block_access.clone();
-        let next_chunk_offset = self.phys.next_chunk_offset;
-        stream! {
-            let mut num_entries = 0;
-            let mut chunk_id = ChunkId(0);
-            for (offset, extent) in phys.extents.iter() {
-                // XXX Probably want to do smaller i/os than the entire extent
-                // (which is up to 128MB).  Also want to issue a few in
-                // parallel?
-
-                let truncated_extent =
-                    extent.range(0, min(extent.size, (next_chunk_offset - *offset)));
-                let extent_bytes = block_access.read_raw(truncated_extent).await;
-                let mut total_consumed = 0;
-                while total_consumed < extent_bytes.len() {
-                    let chunk_location = DiskLocation {
-                        offset: extent.location.offset + total_consumed as u64,
-                    };
-                    trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
-                    // XXX handle checksum error here
-                    let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
-                        .chunk_from_raw(&extent_bytes[total_consumed..])
-                        .with_context(|| format!("{:?} at {:?}", chunk_id, chunk_location))
-                        .unwrap();
-                    assert_eq!(chunk.id, chunk_id);
-                    for entry in chunk.entries {
-                        yield entry;
-                        num_entries += 1;
-                    }
-                    chunk_id = chunk_id.next();
-                    total_consumed += consumed;
-                    if chunk_id == phys.next_chunk {
-                        break;
-                    }
-                }
-            }
-            assert_eq!(phys.num_entries, num_entries);
-        }
+        self.phys.iter_entries(self.block_access.clone())
     }
 }
 

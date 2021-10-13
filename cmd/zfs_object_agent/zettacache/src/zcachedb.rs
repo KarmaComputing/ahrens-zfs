@@ -47,6 +47,7 @@ pub enum ZettaCacheDBCommand {
 pub struct DumpStructuresOptions {
     pub dump_defaults: bool,
     pub dump_spacemaps: bool,
+    pub dump_operation_log_raw: bool,
 }
 
 impl Default for DumpStructuresOptions {
@@ -60,6 +61,7 @@ impl DumpStructuresOptions {
         DumpStructuresOptions {
             dump_defaults: true,
             dump_spacemaps: false,
+            dump_operation_log_raw: false,
         }
     }
 
@@ -70,6 +72,11 @@ impl DumpStructuresOptions {
 
     pub fn spacemaps(mut self, value: bool) -> Self {
         self.dump_spacemaps = value;
+        self
+    }
+
+    pub fn operation_log_raw(mut self, value: bool) -> Self {
+        self.dump_operation_log_raw = value;
         self
     }
 }
