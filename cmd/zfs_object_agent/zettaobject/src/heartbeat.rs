@@ -50,7 +50,7 @@ impl HeartbeatPhys {
         timeout: Option<Duration>,
     ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
         maybe_die_with(|| format!("before putting {:#?}", self));
-        debug!("putting {:#?}", self);
+        trace!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
             .put_object_timed(Self::key(self.id), buf, timeout)
@@ -151,8 +151,8 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
             interval.tick().await;
             if let Some(time) = last_heartbeat {
                 let since = Instant::now().duration_since(time);
-                if since > 2 * *HEARTBEAT_INTERVAL {
-                    debug!("Heartbeat interval significantly over: {:?}", since);
+                if since > *LEASE_DURATION {
+                    warn!("Heartbeat interval significantly over: {:?}", since);
                 } else if since > *HEARTBEAT_INTERVAL {
                     trace!("Heartbeat interval slightly over: {:?}", since);
                 }
@@ -177,8 +177,8 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
             }
             if let Some(time) = last_heartbeat {
                 let since = Instant::now().duration_since(time);
-                if since > 2 * *HEARTBEAT_INTERVAL {
-                    debug!("Heartbeat locking significantly over: {:?}", since);
+                if since > *LEASE_DURATION {
+                    warn!("Heartbeat locking significantly over: {:?}", since);
                 } else if since > *HEARTBEAT_INTERVAL {
                     trace!("Heartbeat locking slightly over: {:?}", since);
                 }
@@ -211,12 +211,10 @@ fn lease_timed_out(last_heartbeat: Option<Instant>) -> bool {
     match last_heartbeat {
         Some(time) => {
             let since = Instant::now().duration_since(time);
-            if since > 2 * *LEASE_DURATION / 3 {
+            if since > *LEASE_DURATION {
                 warn!("Extreme heartbeat delay: {:?}", since);
-            } else if since > *LEASE_DURATION / 3 {
-                info!("Long heartbeat delay: {:?}", since);
             } else {
-                debug!("Short heartbeat delay: {:?}", since);
+                trace!("Short heartbeat delay: {:?}", since);
             }
             since >= *LEASE_DURATION
         }
