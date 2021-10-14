@@ -801,11 +801,15 @@ impl Pool {
         cache: Option<ZettaCache>,
         heartbeat_guard: Option<HeartbeatGuard>,
         readonly: bool,
-        resuming: bool,
+        syncing_txg: Option<Txg>,
     ) -> Result<(Pool, UberblockPhys, BlockId), PoolOpenError> {
         let phys = UberblockPhys::get(&object_access, pool_phys.guid, txg).await?;
 
         features::check_features(phys.features.iter().map(|(f, _)| f), readonly)?;
+
+        if let Some(resume_txg) = syncing_txg {
+            assert_gt!(resume_txg, phys.txg);
+        }
 
         let shared_state = Arc::new(PoolSharedState {
             object_access: object_access.clone(),
@@ -835,13 +839,14 @@ impl Pool {
                 ),
             });
         }
-        let (tx, rx) = watch::channel(resuming);
+
+        let (tx, rx) = watch::channel(syncing_txg.is_some());
         let pool = Pool {
             state: Arc::new(PoolState {
                 shared_state: shared_state.clone(),
                 syncing_state: std::sync::Mutex::new(Some(PoolSyncingState {
                     last_txg: phys.txg,
-                    syncing_txg: None,
+                    syncing_txg,
                     storage_object_log,
                     reclaim_info: ReclaimInfo {
                         indirect_table: ReclaimIndirectTable {
@@ -880,8 +885,6 @@ impl Pool {
 
         let next_block = syncing_state.next_block();
 
-        //println!("opened {:#?}", pool);
-
         *pool.state.syncing_state.lock().unwrap() = Some(syncing_state);
         Ok((pool, phys, next_block))
     }
@@ -892,7 +895,7 @@ impl Pool {
         txg: Option<Txg>,
         cache: Option<ZettaCache>,
         id: Uuid,
-        resuming: bool,
+        syncing_txg: Option<Txg>,
     ) -> Result<(Pool, Option<UberblockPhys>, BlockId), PoolOpenError> {
         let phys = PoolPhys::get(&object_access, guid).await?;
         if phys.last_txg.0 == 0 {
@@ -984,7 +987,7 @@ impl Pool {
                     None
                 },
                 object_access.readonly(),
-                resuming,
+                syncing_txg,
             )
             .await?;
 
@@ -1019,7 +1022,7 @@ impl Pool {
                 join3(
                     pool.state.clone().cleanup_log_objects(),
                     pool.state.clone().cleanup_uberblock_objects(last_txg),
-                    if resuming {
+                    if syncing_txg.is_some() {
                         Either::Left(future::ready(()))
                     } else {
                         Either::Right(state.cleanup_data_objects())
@@ -1029,21 +1032,6 @@ impl Pool {
             }
             Ok((pool, Some(ub), next_block))
         }
-    }
-
-    pub fn resume_txg(&self, txg: Txg) {
-        // The syncing_state is only held while a txg is open (begun).  It's not
-        // allowed to call begin_txg() while a txg is already open, so the lock
-        // must not be held.
-        // XXX change this to return an error to the client
-        self.state.with_syncing_state(|syncing_state| {
-            assert!(syncing_state.syncing_txg.is_none());
-            assert_gt!(txg, syncing_state.last_txg);
-            syncing_state.syncing_txg = Some(txg);
-
-            // Resuming state is indicated by pending_object = NotPending
-            assert!(!syncing_state.pending_object.is_pending());
-        })
     }
 
     async fn get_recovered_objects(

@@ -548,13 +548,23 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
 	fnvlist_add_string(nv, AGENT_ENDPOINT, vos->vos_endpoint);
 	fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
 	fnvlist_add_string(nv, AGENT_BUCKET, vd->vdev_path);
-	fnvlist_add_boolean_value(nv, AGENT_RESUME, resume);
 	if (mode == O_RDONLY)
 		fnvlist_add_boolean(nv, AGENT_READONLY);
 	if (vd->vdev_spa->spa_load_max_txg != UINT64_MAX) {
 		fnvlist_add_uint64(nv, AGENT_TXG,
 		    vd->vdev_spa->spa_load_max_txg);
 	}
+
+	/*
+	 * When we're resuming from an agent restart and we're
+	 * in the middle of a txg, then we need to let the agent
+	 * know the txg value.
+	 */
+	if (resume && vos->vos_send_txg_selector <= VOS_TXG_END) {
+		fnvlist_add_uint64(nv, AGENT_SYNCING_TXG,
+		    spa_syncing_txg(vd->vdev_spa));
+	}
+
 	zfs_dbgmsg("agent_open_pool(guid=%llu bucket=%s)",
 	    (u_longlong_t)spa_guid(vd->vdev_spa),
 	    vd->vdev_path);
@@ -578,22 +588,6 @@ agent_begin_txg(vdev_object_store_t *vos, uint64_t txg)
 	zfs_dbgmsg("agent_begin_txg(%llu)",
 	    (u_longlong_t)txg);
 
-	agent_request(vos, nv, FTAG);
-	fnvlist_free(nv);
-}
-
-static void
-agent_resume_txg(vdev_object_store_t *vos, uint64_t txg)
-{
-	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
-	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
-
-	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_RESUME_TXG);
-	fnvlist_add_uint64(nv, AGENT_TXG, txg);
-
-	zfs_dbgmsg("agent_resume_txg(%llu)",
-	    (u_longlong_t)txg);
 	agent_request(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
@@ -751,10 +745,6 @@ agent_resume(void *arg)
 	}
 
 	mutex_enter(&vos->vos_sock_lock);
-
-	if (vos->vos_send_txg_selector <= VOS_TXG_END) {
-		agent_resume_txg(vos, spa_syncing_txg(spa));
-	}
 
 	vdev_queue_t *vq = &vd->vdev_queue;
 

@@ -69,7 +69,6 @@ impl RootConnectionState {
         server.register_serial_handler("open pool", Box::new(Self::open_pool));
         server.register_serial_handler("resume complete", Box::new(Self::resume_complete));
         server.register_handler("begin txg", Box::new(Self::begin_txg));
-        server.register_handler("resume txg", Box::new(Self::resume_txg));
         server.register_handler("flush writes", Box::new(Self::flush_writes));
         server.register_handler("end txg", Box::new(Self::end_txg));
         server.register_handler("write block", Box::new(Self::write_block));
@@ -121,14 +120,14 @@ impl RootConnectionState {
         info!("got request: {:?}", nvl);
         Box::pin(async move {
             let guid = PoolGuid(nvl.lookup_uint64("GUID")?);
-            let resume = bool_value(&nvl, "resume")?;
 
             let object_access = Self::get_object_access(&nvl)?;
             let cache = self.cache.as_ref().cloned();
             let txg = nvl.lookup_uint64("TXG").ok().map(Txg);
+            let syncing_txg = nvl.lookup_uint64("syncing_txg").ok().map(Txg);
 
             let (pool, phys_opt, next_block) =
-                match Pool::open(object_access, guid, txg, cache, self.id, resume).await {
+                match Pool::open(object_access, guid, txg, cache, self.id, syncing_txg).await {
                     Err(PoolOpenError::Mmp(hostname)) => {
                         let mut response = NvList::new_unique_names();
                         response.insert("Type", "pool open failed").unwrap();
@@ -208,15 +207,6 @@ impl RootConnectionState {
         let txg = Txg(nvl.lookup_uint64("TXG")?);
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
         pool.begin_txg(txg);
-
-        handler_return_ok(None)
-    }
-
-    fn resume_txg(&mut self, nvl: NvList) -> HandlerReturn {
-        info!("got request: {:?}", nvl);
-        let txg = Txg(nvl.lookup_uint64("TXG")?);
-        let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
-        pool.resume_txg(txg);
 
         handler_return_ok(None)
     }
