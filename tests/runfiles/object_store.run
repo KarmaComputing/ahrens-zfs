@@ -325,3 +325,26 @@ tests = ['zfs_send_001_pos', 'zfs_send_002_pos', 'zfs_send_003_pos',
         'zfs_send_encrypted', 'zfs_send_raw', 'zfs_send_skip_missing',
         'zfs_send_sparse', 'zfs_send-b']
 tags = ['functional', 'cli_root', 'zfs_send']
+
+[tests/functional/cli_root/zfs_property]
+tests = ['zfs_written_property_001_pos']
+tags = ['functional', 'cli_root', 'zfs_property']
+
+[tests/functional/cli_root/zfs_rollback]
+tests = ['zfs_rollback_001_pos', 'zfs_rollback_002_pos', 'zfs_rollback_003_neg',
+        'zfs_rollback_004_neg']
+tags = ['functional', 'cli_root', 'zfs_rollback']
+
+[tests/functional/cli_root/zpool_destroy]
+tests = ['zpool_destroy_001_pos', 'zpool_destroy_002_pos', 'zpool_destroy_003_neg']
+pre =
+post =
+tags = ['functional', 'cli_root', 'zpool_destroy']
+
+[tests/functional/cli_root/zpool_sync]
+tests = ['zpool_sync_001_pos', 'zpool_sync_002_neg']
+tags = ['functional', 'cli_root', 'zpool_sync']
+
+[tests/functional/cli_root/zpool_history]
+tests = ['zpool_history_001_neg', 'zpool_history_002_pos']
+tags = ['functional', 'cli_root', 'zpool_history']

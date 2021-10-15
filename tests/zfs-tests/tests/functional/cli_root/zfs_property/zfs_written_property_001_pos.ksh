@@ -218,7 +218,13 @@ for ds in $datasets; do
 done
 recursive_output=$(zfs get -p -r written@current $TESTPOOL | \
     grep -v $TESTFS1@ | grep -v $TESTFS2@ | grep -v $TESTFS3@ | \
-    grep -v "VALUE" | grep -v "-")
+    grep -v "VALUE" | grep -v " - ")
+# Notice how we added spaces around the '-'
+# This is to deal with the pool name change with PR#493
+# that makes it unique across the runs.
+# Example: testpool-c516e37c-8b8e
+# With this change if we tried to do a inverse match of '-'
+# it'd omit all output from 'zfs get -p -r written@current $TESTPOOL'
 expected="$((20 * mb_block))"
 for ds in $datasets; do
 	writtenat=$(echo "$recursive_output" | grep -v $ds/)
