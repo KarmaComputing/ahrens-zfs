@@ -47,6 +47,7 @@ struct BlockHeader {
 #[derive(Debug)]
 pub struct BlockAccess {
     disk: File,
+    readonly: bool,
     size: u64,
     sector_size: usize,
     metrics: BlockAccessMetrics,
@@ -83,10 +84,10 @@ const CUSTOM_OFLAGS: i32 = 0;
 // hardware directly).  Or at least use O_DIRECT.
 #[metered(registry=BlockAccessMetrics)]
 impl BlockAccess {
-    pub async fn new(disk_path: &str) -> BlockAccess {
+    pub async fn new(disk_path: &str, readonly: bool) -> BlockAccess {
         let disk = OpenOptions::new()
             .read(true)
-            .write(true)
+            .write(!readonly)
             .custom_flags(CUSTOM_OFLAGS)
             .open(disk_path)
             .await
@@ -118,6 +119,7 @@ impl BlockAccess {
 
         let this = BlockAccess {
             disk,
+            readonly,
             size,
             sector_size,
             metrics: Default::default(),
@@ -181,6 +183,10 @@ impl BlockAccess {
     // Acquire a permit to write later.  This should be used only for data
     // writes.  See the comment in write_raw() for details.
     pub async fn acquire_write(&self) -> WritePermit {
+        assert!(
+            !self.readonly,
+            "attempting zettacache write in readonly mode"
+        );
         WritePermit(
             self.outstanding_data_writes
                 .clone()
@@ -197,6 +203,10 @@ impl BlockAccess {
     #[measure(Throughput)]
     #[measure(HitCount)]
     pub async fn write_raw(&self, location: DiskLocation, data: Vec<u8>) {
+        assert!(
+            !self.readonly,
+            "attempting zettacache write in readonly mode"
+        );
         // We need a different semaphore for metadata writes, so that
         // outstanding data write permits can't starve/deadlock metadata writes.
         // We may block on locks (e.g. waiting on the ZettaCacheState lock)
@@ -224,6 +234,10 @@ impl BlockAccess {
         location: DiskLocation,
         data: Vec<u8>,
     ) -> JoinHandle<()> {
+        assert!(
+            !self.readonly,
+            "attempting zettacache write in readonly mode"
+        );
         let fd = self.disk.as_raw_fd();
         let sector_size = self.sector_size;
         let length = data.len();

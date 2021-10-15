@@ -539,7 +539,7 @@ pub enum InsertSource {
 #[metered(registry=ZettaCacheMetrics)]
 impl ZettaCache {
     pub async fn create(path: &str) {
-        let block_access = BlockAccess::new(path).await;
+        let block_access = BlockAccess::new(path, false).await;
         let metadata_start = *SUPERBLOCK_SIZE + u64::from(*DEFAULT_CHECKPOINT_RING_BUFFER_SIZE);
         let data_start = block_access.round_up_to_sector(
             metadata_start
@@ -585,7 +585,7 @@ impl ZettaCache {
     }
 
     pub async fn zcachedb_dump_structures(path: &str, opts: DumpStructuresOptions) {
-        let block_access = Arc::new(BlockAccess::new(path).await);
+        let block_access = Arc::new(BlockAccess::new(path, true).await);
 
         let superblock = match ZettaSuperBlockPhys::read(&block_access).await {
             Ok(phys) => phys,
@@ -633,7 +633,7 @@ impl ZettaCache {
     }
 
     pub async fn open(path: &str) -> ZettaCache {
-        let block_access = Arc::new(BlockAccess::new(path).await);
+        let block_access = Arc::new(BlockAccess::new(path, false).await);
 
         // if superblock not present, create new cache
         // XXX need a real mechanism for creating/managing the cache devices
