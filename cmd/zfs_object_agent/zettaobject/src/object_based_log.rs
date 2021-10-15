@@ -1,5 +1,5 @@
 use crate::base_types::*;
-use crate::object_access::ObjectAccess;
+use crate::object_access::{ObjectAccess, ObjectAccessStatType};
 use crate::pool::PoolSharedState;
 use anyhow::{Context, Result};
 use async_stream::stream;
@@ -91,7 +91,10 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
         chunk: u64,
     ) -> Result<Self> {
         let buf = object_access
-            .get_object(Self::key(name, generation, chunk))
+            .get_object(
+                Self::key(name, generation, chunk),
+                ObjectAccessStatType::MetadataGet,
+            )
             .await?;
         let begin = Instant::now();
         let this: Self = serde_json::from_slice(&buf).with_context(|| {
@@ -119,7 +122,11 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
             begin.elapsed().as_millis()
         );
         object_access
-            .put_object(Self::key(name, self.generation, self.chunk), buf)
+            .put_object(
+                Self::key(name, self.generation, self.chunk),
+                buf,
+                ObjectAccessStatType::MetadataPut,
+            )
             .await;
     }
 }

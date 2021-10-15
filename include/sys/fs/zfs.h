@@ -693,6 +693,9 @@ typedef struct zpool_load_policy {
 /* Number of slow IOs */
 #define	ZPOOL_CONFIG_VDEV_SLOW_IOS		"vdev_slow_ios"
 
+/* container nvlist of object store backend  stats */
+#define	ZPOOL_CONFIG_OBJECT_STORE_STATS		"object_store_stats"
+
 /* vdev enclosure sysfs path */
 #define	ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH	"vdev_enc_sysfs_path"
 

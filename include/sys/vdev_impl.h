@@ -99,7 +99,7 @@ typedef uint64_t vdev_rebuild_asize_func_t(vdev_t *vd, uint64_t start,
     uint64_t size, uint64_t max_segment);
 typedef void vdev_metaslab_init_func_t(vdev_t *vd, metaslab_t *msp,
     uint64_t *startp, uint64_t *sizep);
-typedef void vdev_config_generate_func_t(vdev_t *vd, nvlist_t *nv);
+typedef void vdev_config_generate_func_t(vdev_t *, nvlist_t *, boolean_t);
 typedef uint64_t vdev_nparity_func_t(vdev_t *vd);
 typedef uint64_t vdev_ndisks_func_t(vdev_t *vd);
 typedef void vdev_enable_feature_func_t(vdev_t *vd, zfeature_info_t *zfeature);

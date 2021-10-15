@@ -893,6 +893,8 @@ vdev_queue_io(zio_t *zio)
 	zio_t *dio, *nio;
 	zio_link_t *zl = NULL;
 
+	zio->io_timestamp = gethrtime();
+
 	if (zio->io_flags & ZIO_FLAG_DONT_QUEUE)
 		return (zio);
 
@@ -933,7 +935,6 @@ vdev_queue_io(zio_t *zio)
 	}
 
 	zio->io_flags |= ZIO_FLAG_DONT_CACHE | ZIO_FLAG_DONT_QUEUE;
-	zio->io_timestamp = gethrtime();
 
 	mutex_enter(&vq->vq_lock);
 	vdev_queue_io_add(vq, zio);

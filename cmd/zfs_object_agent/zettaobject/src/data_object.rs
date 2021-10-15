@@ -1,4 +1,5 @@
-use crate::{base_types::*, ObjectAccess};
+use crate::base_types::*;
+use crate::object_access::{ObjectAccess, ObjectAccessStatType};
 use anyhow::{Context, Result};
 use log::*;
 use more_asserts::*;
@@ -100,15 +101,20 @@ impl DataObjectPhys {
         object_access: &ObjectAccess,
         guid: PoolGuid,
         object: ObjectId,
+        stat_type: ObjectAccessStatType,
         bypass_cache: bool,
     ) -> Result<Self> {
         let buf = match bypass_cache {
             true => {
                 object_access
-                    .get_object_uncached(Self::key(guid, object))
+                    .get_object_uncached(Self::key(guid, object), stat_type)
                     .await?
             }
-            false => object_access.get_object(Self::key(guid, object)).await?,
+            false => {
+                object_access
+                    .get_object(Self::key(guid, object), stat_type)
+                    .await?
+            }
         };
         let begin = Instant::now();
         let this: DataObjectPhys = bincode::deserialize(&buf)
@@ -129,11 +135,16 @@ impl DataObjectPhys {
     pub async fn get_from_key(
         object_access: &ObjectAccess,
         key: String,
+        stat_type: ObjectAccessStatType,
         bypass_cache: bool,
     ) -> Result<Self> {
         let buf = match bypass_cache {
-            true => object_access.get_object_uncached(key.clone()).await?,
-            false => object_access.get_object(key.clone()).await?,
+            true => {
+                object_access
+                    .get_object_uncached(key.clone(), stat_type)
+                    .await?
+            }
+            false => object_access.get_object(key.clone(), stat_type).await?,
         };
         let begin = Instant::now();
         let this: DataObjectPhys = bincode::deserialize(&buf)
@@ -149,7 +160,7 @@ impl DataObjectPhys {
         Ok(this)
     }
 
-    pub async fn put(&self, object_access: &ObjectAccess) {
+    pub async fn put(&self, object_access: &ObjectAccess, stat_type: ObjectAccessStatType) {
         let begin = Instant::now();
         let contents = bincode::serialize(self).unwrap();
         trace!(
@@ -161,7 +172,7 @@ impl DataObjectPhys {
         );
         self.verify();
         object_access
-            .put_object(Self::key(self.guid, self.object), contents)
+            .put_object(Self::key(self.guid, self.object), contents, stat_type)
             .await;
     }
 

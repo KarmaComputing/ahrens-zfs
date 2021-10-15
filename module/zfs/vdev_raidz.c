@@ -2488,7 +2488,7 @@ vdev_raidz_fini(vdev_t *vd)
  * Add RAIDZ specific fields to the config nvlist.
  */
 static void
-vdev_raidz_config_generate(vdev_t *vd, nvlist_t *nv)
+vdev_raidz_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 {
 	ASSERT3P(vd->vdev_ops, ==, &vdev_raidz_ops);
 	vdev_raidz_t *vdrz = vd->vdev_tsd;

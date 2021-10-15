@@ -8,8 +8,7 @@ use crate::heartbeat::HeartbeatGuard;
 use crate::heartbeat::HeartbeatPhys;
 use crate::heartbeat::HEARTBEAT_INTERVAL;
 use crate::heartbeat::LEASE_DURATION;
-use crate::object_access::OAError;
-use crate::object_access::ObjectAccess;
+use crate::object_access::{OAError, ObjectAccess, ObjectAccessStatType};
 use crate::object_based_log::*;
 use crate::object_block_map::ObjectBlockMap;
 use crate::object_block_map::StorageObjectLogEntry;
@@ -122,7 +121,9 @@ impl PoolOwnerPhys {
     }
 
     async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
-        let buf = object_access.get_object_impl(Self::key(id), None).await?;
+        let buf = object_access
+            .get_object_impl(Self::key(id), ObjectAccessStatType::MetadataGet, None)
+            .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
         debug!("got {:#?}", this);
@@ -139,7 +140,12 @@ impl PoolOwnerPhys {
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
-            .put_object_timed(Self::key(self.id), buf, timeout)
+            .put_object_timed(
+                Self::key(self.id),
+                buf,
+                ObjectAccessStatType::MetadataPut,
+                timeout,
+            )
             .await
     }
 
@@ -276,7 +282,9 @@ impl PoolPhys {
     }
 
     pub async fn get(object_access: &ObjectAccess, guid: PoolGuid) -> Result<Self> {
-        let buf = object_access.get_object(Self::key(guid)).await?;
+        let buf = object_access
+            .get_object(Self::key(guid), ObjectAccessStatType::MetadataGet)
+            .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(guid)))?;
         debug!("got {:#?}", this);
@@ -288,7 +296,9 @@ impl PoolPhys {
         maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
-        object_access.put_object(Self::key(self.guid), buf).await;
+        object_access
+            .put_object(Self::key(self.guid), buf, ObjectAccessStatType::MetadataPut)
+            .await;
     }
 }
 
@@ -311,7 +321,9 @@ impl UberblockPhys {
     }
 
     async fn get(object_access: &ObjectAccess, guid: PoolGuid, txg: Txg) -> Result<Self> {
-        let buf = object_access.get_object(Self::key(guid, txg)).await?;
+        let buf = object_access
+            .get_object(Self::key(guid, txg), ObjectAccessStatType::MetadataGet)
+            .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(guid, txg)))?;
         debug!("got {:#?}", this);
@@ -325,7 +337,11 @@ impl UberblockPhys {
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
-            .put_object(Self::key(self.guid, self.txg), buf)
+            .put_object(
+                Self::key(self.guid, self.txg),
+                buf,
+                ObjectAccessStatType::MetadataPut,
+            )
             .await;
     }
 
@@ -1059,7 +1075,13 @@ impl Pool {
                 for key in vec {
                     let shared_state = shared_state.clone();
                     sub_stream.push(future::ready(async move {
-                        DataObjectPhys::get_from_key(&shared_state.object_access, key, false).await
+                        DataObjectPhys::get_from_key(
+                            &shared_state.object_access,
+                            key,
+                            ObjectAccessStatType::ReadsGet,
+                            false,
+                        )
+                        .await
                     }));
                 }
                 sub_stream
@@ -1472,7 +1494,11 @@ impl Pool {
         // write to object store and wake up waiters
         let shared_state = state.shared_state.clone();
         tokio::spawn(async move {
-            phys.put(&shared_state.object_access).await;
+            phys.put(
+                &shared_state.object_access,
+                ObjectAccessStatType::TxgSyncPut,
+            )
+            .await;
             for sender in senders {
                 sender.send(()).unwrap();
             }
@@ -1587,6 +1613,7 @@ impl Pool {
             &shared_state.object_access,
             shared_state.guid,
             object,
+            ObjectAccessStatType::ReadsGet,
             bypass_cache,
         )
         .await
@@ -2059,7 +2086,7 @@ async fn reclaim_frees_object(
             // overwrite it with put(), we don't need to copy the data into the
             // cache to invalidate.
             let mut phys =
-                DataObjectPhys::get(&my_shared_state.object_access, my_shared_state.guid, object, true)
+                DataObjectPhys::get(&my_shared_state.object_access, my_shared_state.guid, object, ObjectAccessStatType::ReclaimGet, true)
                     .await
                     .unwrap();
 
@@ -2173,7 +2200,12 @@ async fn reclaim_frees_object(
     // XXX would be nice to skip this if we didn't actually make any change
     // (because we already did it all before crashing)
     trace!("reclaim: rewriting {}", new_phys);
-    new_phys.put(&shared_state.object_access).await;
+    new_phys
+        .put(
+            &shared_state.object_access,
+            ObjectAccessStatType::ReclaimPut,
+        )
+        .await;
 
     (&new_phys).into()
 }

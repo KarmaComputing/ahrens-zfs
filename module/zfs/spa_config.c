@@ -34,6 +34,7 @@
 #include <sys/nvpair.h>
 #include <sys/fs/zfs.h>
 #include <sys/vdev_impl.h>
+#include <sys/vdev_object_store.h>
 #include <sys/zfs_ioctl.h>
 #include <sys/systeminfo.h>
 #include <sys/sunddi.h>

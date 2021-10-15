@@ -97,8 +97,9 @@ typedef struct vdev_object_store {
 	kcondvar_t vos_cv;
 	boolean_t vos_agent_thread_exit;
 
-	kmutex_t vos_stats_lock;
+	kmutex_t vos_stats_lock; /* protects vos_stats and avl tree */
 	vdev_object_store_stats_t vos_stats;
+	avl_tree_t vos_pending_stats_tree;
 
 	kmutex_t vos_sock_lock;
 	kcondvar_t vos_sock_cv;
@@ -118,6 +119,18 @@ typedef struct vdev_object_store {
 
 	list_t vos_free_list;
 } vdev_object_store_t;
+
+/*
+ * Kernel context for vdev_object_store_stats_generate() calls
+ */
+typedef struct object_store_stats_call {
+	kmutex_t	oss_lock;
+	kcondvar_t	oss_cv;
+	uint64_t	oss_owner;
+	nvlist_t	*oss_nvl;
+	avl_node_t	oss_node;
+} object_store_stats_call_t;
+
 
 static mode_t
 vdev_object_store_open_mode(spa_mode_t spa_mode)
@@ -779,6 +792,27 @@ agent_resume(void *arg)
 		agent_io_block_free(nv);
 	}
 	mutex_exit(&vq->vq_lock);
+
+	/*
+	 * process any pending stat callers
+	 */
+	mutex_enter(&vos->vos_stats_lock);
+	for (object_store_stats_call_t *caller =
+	    avl_first(&vos->vos_pending_stats_tree); caller != NULL;
+	    caller = AVL_NEXT(&vos->vos_pending_stats_tree, caller)) {
+		nvlist_t *request = fnvlist_alloc();
+
+		fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_GET_STATS);
+		fnvlist_add_uint64(request, AGENT_TOKEN, caller->oss_owner);
+
+		zfs_dbgmsg("reissue ovdev_object_store_stats_generate, owner "
+		    "0x%llx", (u_longlong_t)caller->oss_owner);
+
+		agent_request(vos, request, FTAG);
+		fnvlist_free(request);
+	}
+	mutex_exit(&vos->vos_stats_lock);
+
 	if (vos->vos_send_txg_selector <= VOS_TXG_END) {
 		agent_resume_complete(vos);
 	}
@@ -920,6 +954,60 @@ object_store_get_stats(vdev_t *vd, vdev_object_store_stats_t *vossp)
 	mutex_enter(&vos->vos_stats_lock);
 	*vossp = vos->vos_stats;
 	mutex_exit(&vos->vos_stats_lock);
+}
+
+/*
+ * Generate the object store specific stats as an nvlist
+ */
+static void
+vdev_object_store_stats_generate(vdev_t *vd, nvlist_t *nv)
+{
+	ASSERT(vdev_is_object_based(vd) && vd->vdev_ops->vdev_op_leaf);
+	vdev_object_store_t *vos = vd->vdev_tsd;
+	object_store_stats_call_t stats_call;
+
+	stats_call.oss_nvl = NULL;
+	stats_call.oss_owner = (uint64_t)curthread;
+	mutex_init(&stats_call.oss_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&stats_call.oss_cv, NULL, CV_DEFAULT, NULL);
+
+	mutex_enter(&vos->vos_stats_lock);
+	avl_add(&vos->vos_pending_stats_tree, &stats_call);
+	mutex_exit(&vos->vos_stats_lock);
+
+	nvlist_t *request = fnvlist_alloc();
+	fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_GET_STATS);
+	fnvlist_add_uint64(request, AGENT_TOKEN, stats_call.oss_owner);
+
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("vdev_object_store_stats_generate(guid=%llu)",
+		    (u_longlong_t)spa_guid(vd->vdev_spa));
+	}
+
+	/*
+	 * We need to ensure that we only issue a request when the
+	 * socket is ready. Otherwise, we block here since the agent
+	 * might be in recovery.
+	 */
+	mutex_enter(&vos->vos_sock_lock);
+	zfs_object_store_wait(vos, VOS_SOCK_READY);
+
+	agent_request(vos, request, FTAG);
+	mutex_exit(&vos->vos_sock_lock);
+	fnvlist_free(request);
+
+	/* Wait for response from agent */
+	mutex_enter(&stats_call.oss_lock);
+	while (stats_call.oss_nvl == NULL) {
+		cv_wait(&stats_call.oss_cv, &stats_call.oss_lock);
+	}
+	mutex_exit(&stats_call.oss_lock);
+	mutex_destroy(&stats_call.oss_lock);
+	cv_destroy(&stats_call.oss_cv);
+
+	fnvlist_add_nvlist(nv, ZPOOL_CONFIG_OBJECT_STORE_STATS,
+	    stats_call.oss_nvl);
+	nvlist_free(stats_call.oss_nvl);
 }
 
 static void
@@ -1179,6 +1267,33 @@ agent_reader(void *arg)
 		vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE] = B_TRUE;
 		cv_broadcast(&vos->vos_outstanding_cv);
 		mutex_exit(&vos->vos_outstanding_lock);
+	} else if (strcmp(type, AGENT_TYPE_GET_STATS_DONE) == 0) {
+		object_store_stats_call_t *caller, search;
+
+		nvlist_t *stats = fnvlist_lookup_nvlist(nv, AGENT_STATS);
+		search.oss_owner = fnvlist_lookup_uint64(nv, AGENT_TOKEN);
+		mutex_enter(&vos->vos_stats_lock);
+		caller = avl_find(&vos->vos_pending_stats_tree, &search, NULL);
+		if (caller != NULL)
+			avl_remove(&vos->vos_pending_stats_tree, caller);
+		mutex_exit(&vos->vos_stats_lock);
+
+		if (caller != NULL) {
+			mutex_enter(&caller->oss_lock);
+			if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+				zfs_dbgmsg("got get stats done token 0x%llx",
+				    (longlong_t)caller->oss_owner);
+			}
+			ASSERT(caller->oss_nvl == NULL);
+			caller->oss_nvl = fnvlist_dup(stats);
+			cv_broadcast(&caller->oss_cv);
+			mutex_exit(&caller->oss_lock);
+		} else {
+			/* unexpected */
+			zfs_dbgmsg("unexpected get stats done response: "
+			    "owner 0x%llx", (longlong_t)search.oss_owner);
+		}
+		fnvlist_free(nv);
 	} else {
 		zfs_dbgmsg("unrecognized response type!");
 	}
@@ -1282,6 +1397,13 @@ vdev_agent_thread(void *arg)
 }
 
 static int
+pending_stats_compare(const void *x1, const void *x2)
+{
+	return (TREE_CMP(((const object_store_stats_call_t *)x1)->oss_owner,
+	    ((const object_store_stats_call_t *)x2)->oss_owner));
+}
+
+static int
 vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 {
 	vdev_object_store_t *vos;
@@ -1299,6 +1421,9 @@ vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	cv_init(&vos->vos_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_sock_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_outstanding_cv, NULL, CV_DEFAULT, NULL);
+	avl_create(&vos->vos_pending_stats_tree, pending_stats_compare,
+	    sizeof (object_store_stats_call_t),
+	    offsetof(object_store_stats_call_t, oss_node));
 
 	list_create(&vos->vos_free_list, sizeof (object_store_free_block_t),
 	    offsetof(object_store_free_block_t, osfb_list_node));
@@ -1339,6 +1464,7 @@ vdev_object_store_fini(vdev_t *vd)
 	cv_destroy(&vos->vos_cv);
 	cv_destroy(&vos->vos_sock_cv);
 	cv_destroy(&vos->vos_outstanding_cv);
+	avl_destroy(&vos->vos_pending_stats_tree);
 	if (vos->vos_endpoint != NULL) {
 		kmem_strfree(vos->vos_endpoint);
 	}
@@ -1544,7 +1670,7 @@ vdev_object_store_io_done(zio_t *zio)
 }
 
 static void
-vdev_object_store_config_generate(vdev_t *vd, nvlist_t *nv)
+vdev_object_store_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 {
 	vdev_object_store_t *vos = vd->vdev_tsd;
 
@@ -1556,6 +1682,9 @@ vdev_object_store_config_generate(vdev_t *vd, nvlist_t *nv)
 		fnvlist_add_string(nv, ZPOOL_CONFIG_CRED_PROFILE,
 		    vos->vos_cred_profile);
 	}
+
+	if (getstats)
+		vdev_object_store_stats_generate(vd, nv);
 }
 
 static void

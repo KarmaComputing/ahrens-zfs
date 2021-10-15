@@ -74,6 +74,7 @@ impl RootConnectionState {
         server.register_handler("write block", Box::new(Self::write_block));
         server.register_handler("free block", Box::new(Self::free_block));
         server.register_handler("read block", Box::new(Self::read_block));
+        server.register_handler("get stats", Box::new(Self::get_stats));
         server.register_handler("close pool", Box::new(Self::close_pool));
         server.register_handler("exit agent", Box::new(Self::exit_agent));
         server.register_handler("enable feature", Box::new(Self::enable_feature));
@@ -352,6 +353,39 @@ impl RootConnectionState {
             );
             Ok(Some(nvl))
         }))
+    }
+
+    fn get_stats(&mut self, nvl: NvList) -> HandlerReturn {
+        trace!("got request: {:?}", nvl);
+        let token = nvl.lookup_uint64("token")?;
+
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pool open"))?
+            .clone();
+
+        // build an nvlist from the stats hash map
+        let (stats, timestamp) = pool.state.shared_state.object_access.collect_stats();
+        let mut nvl = NvList::new_unique_names();
+        nvl.insert("Timestamp", &timestamp).unwrap();
+        for (stat_type, stat_map) in stats.iter() {
+            let mut contents = NvList::new_unique_names();
+            for (key, value) in stat_map.iter() {
+                // e.g. "operations": 459
+                contents.insert(key, value).unwrap();
+            }
+            // e.g. "MetadataPut": {"operations": 459, "total_bytes": 350280}
+            nvl.insert(stat_type, contents.as_ref()).unwrap();
+        }
+
+        let mut response = NvList::new_unique_names();
+        response.insert("Type", "get stats done").unwrap();
+        response.insert("token", &token).unwrap();
+        response.insert("stats", nvl.as_ref()).unwrap();
+
+        trace!("sending stats done response: {:?}", response);
+        handler_return_ok(Some(response))
     }
 
     fn close_pool(&mut self, nvl: NvList) -> HandlerReturn {

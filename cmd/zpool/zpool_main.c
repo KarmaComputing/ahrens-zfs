@@ -193,15 +193,21 @@ enum iostat_type {
 	IOS_QUEUES = 2,
 	IOS_L_HISTO = 3,
 	IOS_RQ_HISTO = 4,
+	IOS_OBJECT_STORE = 5,
+	IOS_OBJECT_LATENCY = 6,
 	IOS_COUNT,	/* always last element */
 };
 
 /* iostat_type entries as bitmasks */
-#define	IOS_DEFAULT_M	(1ULL << IOS_DEFAULT)
-#define	IOS_LATENCY_M	(1ULL << IOS_LATENCY)
-#define	IOS_QUEUES_M	(1ULL << IOS_QUEUES)
-#define	IOS_L_HISTO_M	(1ULL << IOS_L_HISTO)
-#define	IOS_RQ_HISTO_M	(1ULL << IOS_RQ_HISTO)
+#define	IOS_DEFAULT_M		(1ULL << IOS_DEFAULT)
+#define	IOS_LATENCY_M		(1ULL << IOS_LATENCY)
+#define	IOS_QUEUES_M		(1ULL << IOS_QUEUES)
+#define	IOS_L_HISTO_M		(1ULL << IOS_L_HISTO)
+#define	IOS_RQ_HISTO_M		(1ULL << IOS_RQ_HISTO)
+#define	IOS_OBJECT_STORE_M	(1ULL << IOS_OBJECT_STORE)
+#define	IOS_OBJECT_LATENCY_M	(1ULL << IOS_OBJECT_LATENCY)
+
+#define	IOS_OBJECT_ANY_M	(IOS_OBJECT_STORE_M | IOS_OBJECT_LATENCY_M)
 
 /* Mask of all the histo bits */
 #define	IOS_ANYHISTO_M (IOS_L_HISTO_M | IOS_RQ_HISTO_M)
@@ -3936,7 +3942,7 @@ typedef struct name_and_columns {
 	unsigned int columns;	/* Center name to this number of columns */
 } name_and_columns_t;
 
-#define	IOSTAT_MAX_LABELS	15	/* Max number of labels on one line */
+#define	IOSTAT_MAX_LABELS	20	/* Max number of labels on one line */
 
 static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 {
@@ -3953,6 +3959,11 @@ static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_RQ_HISTO] = {{"sync_read", 2}, {"sync_write", 2},
 	    {"async_read", 2}, {"async_write", 2}, {"scrub", 2},
 	    {"trim", 2}, {"rebuild", 2}, {NULL}},
+	[IOS_OBJECT_STORE] = { {"operations", 2}, {"throughput", 2},
+	    {"operations", 2}, {"throughput", 2}, {"operations", 2},
+	    {"throughput", 2}, {"object", 1}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"latency", 2}, {"operations", 2},
+	    {"throughput", 2}, {"latency", 2}, {NULL}},
 };
 
 /* Shorthand - if "columns" field not set, default to 1 column */
@@ -3972,6 +3983,26 @@ static const name_and_columns_t iostat_bottom_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_RQ_HISTO] = {{"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
 	    {"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
 	    {"ind"}, {"agg"}, {NULL}},
+	[IOS_OBJECT_STORE] = {{"get"}, {"put"}, {"get"}, {"put"}, {"get"},
+	    {"put"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"}, {"put"},
+	    {"del"}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"read"}, {"write"}, {"get"}, {"put"}, {"get"},
+	    {"put"}, {"get"}, {"put"}, {NULL}},
+};
+
+static const name_and_columns_t iostat_object_top_labels[][IOSTAT_MAX_LABELS] =
+{
+	[IOS_DEFAULT] = {{NULL}},
+	[IOS_LATENCY] = {{NULL}},
+	[IOS_QUEUES] = {{NULL}},
+	[IOS_L_HISTO] = {{NULL}},
+	[IOS_RQ_HISTO] = {{NULL}},
+	[IOS_OBJECT_STORE] = {{"", 2}, {"object_agent_io", 4},
+	    {"object_store_data", 4}, {"object_store_metadata", 4},
+	    {"object_store_reclaim", 4}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"", 2},
+	    {"---------- object_agent_total ----------", 6},
+	    {"---------- object_store_total ----------", 6}, {NULL}},
 };
 
 static const char *histo_to_title[] = {
@@ -4032,6 +4063,8 @@ default_column_width(iostat_cbdata_t *cb, enum iostat_type type)
 		[IOS_QUEUES] = 6,   /* 1M queue entries */
 		[IOS_L_HISTO] = 10, /* 1B ns = 10sec */
 		[IOS_RQ_HISTO] = 6, /* 1M queue entries */
+		[IOS_OBJECT_STORE] = 15, /* 1PB capacity */
+		[IOS_OBJECT_LATENCY] = 10, /* 1B ns = 10sec */
 	};
 
 	if (cb->cb_literal)
@@ -4067,6 +4100,16 @@ print_iostat_labels(iostat_cbdata_t *cb, unsigned int force_column_width,
 		/* Print our top labels centered over "read  write" label. */
 		for (i = 0; i < label_array_len(labels[idx]); i++) {
 			const char *name = labels[idx][i].name;
+
+			/*
+			 * When using default labels with object store stats
+			 * switch to using 'throughput' to match new stats.
+			 */
+			if (cb->cb_flags & IOS_OBJECT_ANY_M &&
+			    strcmp(name, "bandwidth") == 0) {
+				name = "throughput";
+			}
+
 			/*
 			 * We treat labels[][].columns == 0 as shorthand
 			 * for one column.  It makes writing out the label
@@ -4078,8 +4121,10 @@ print_iostat_labels(iostat_cbdata_t *cb, unsigned int force_column_width,
 			rw_column_width = (column_width * columns) +
 			    (2 * (columns - 1));
 
-			text_start = (int)((rw_column_width) / columns -
+			columns = MIN(2, columns);
+			text_start = (int)(rw_column_width / columns -
 			    slen / columns);
+
 			if (text_start < 0)
 				text_start = 0;
 
@@ -4250,11 +4295,17 @@ print_iostat_header_impl(iostat_cbdata_t *cb, unsigned int force_column_width,
 	namewidth = MAX(MAX(strlen(title), cb->cb_namewidth),
 	    histo_vdev_name ? strlen(histo_vdev_name) : 0);
 
+	/* Object Store iostats have an additional top row of labels */
+	if (cb->cb_flags & IOS_OBJECT_ANY_M) {
+		printf("%*s", namewidth, "");
+		print_iostat_labels(cb, force_column_width,
+		    iostat_object_top_labels);
+		printf("\n");
+	}
 	if (histo_vdev_name)
 		printf("%-*s", namewidth, histo_vdev_name);
 	else
 		printf("%*s", namewidth, "");
-
 
 	print_iostat_labels(cb, force_column_width, iostat_top_labels);
 	printf("\n");
@@ -4297,6 +4348,25 @@ print_one_stat(uint64_t value, enum zfs_nicenum_format format,
 		printf("\t%s", buf);
 	else
 		printf("  %*s", column_size, buf);
+}
+
+static void
+print_one_stat_fractional(double value, enum zfs_nicenum_format format,
+    unsigned int column_size, boolean_t scripted)
+{
+	/*
+	 * The operations values can be single digit and thay have been
+	 * scaled. Display values less than 9 as a float for more accuracy.
+	 */
+	if (format == ZFS_NICENUM_1024 && value != 0.0 && value < 9.0) {
+		if (scripted)
+			printf("\t%.2f", value);
+		else
+			printf("  %*.2f", column_size, value);
+	} else {
+		print_one_stat((uint64_t)(value + 0.5), format, column_size,
+		    scripted);
+	}
 }
 
 /*
@@ -4699,14 +4769,147 @@ print_iostat_default(vdev_stat_t *vs, iostat_cbdata_t *cb, double scale)
 		    column_width, cb->cb_scripted);
 	}
 
-	print_one_stat((uint64_t)(vs->vs_ops[ZIO_TYPE_READ] * scale),
-	    format, column_width, cb->cb_scripted);
-	print_one_stat((uint64_t)(vs->vs_ops[ZIO_TYPE_WRITE] * scale),
-	    format, column_width, cb->cb_scripted);
+	print_one_stat_fractional(vs->vs_ops[ZIO_TYPE_READ] * scale, format,
+	    column_width, cb->cb_scripted);
+	print_one_stat_fractional(vs->vs_ops[ZIO_TYPE_WRITE] * scale, format,
+	    column_width, cb->cb_scripted);
 	print_one_stat((uint64_t)(vs->vs_bytes[ZIO_TYPE_READ] * scale),
 	    format, column_width, cb->cb_scripted);
 	print_one_stat((uint64_t)(vs->vs_bytes[ZIO_TYPE_WRITE] * scale),
 	    format, column_width, cb->cb_scripted);
+}
+
+static void
+print_one_oss(nvlist_t *oldnv, nvlist_t *newnv, const char *type,
+    const char *stat, iostat_cbdata_t *cb, double scale)
+{
+	unsigned int width = default_column_width(cb, IOS_OBJECT_STORE);
+	uint64_t oldval = 0, newval = 0;
+	enum zfs_nicenum_format format;
+	boolean_t scripted = cb->cb_scripted;
+	nvlist_t *nv;
+
+	format = cb->cb_literal ? ZFS_NICENUM_RAW : ZFS_NICENUM_1024;
+
+	if (nvlist_lookup_nvlist(oldnv, type, &nv) == 0)
+		oldval = fnvlist_lookup_uint64(nv, stat);
+	if (nvlist_lookup_nvlist(newnv, type, &nv) == 0)
+		newval = fnvlist_lookup_uint64(nv, stat);
+
+	/*
+	 * If the object agent restarts then counters get reset. When that
+	 * occurs we can ignore the old value.
+	 */
+	if (newval < oldval)
+		oldval = 0;
+
+	print_one_stat_fractional((newval - oldval) * scale, format, width,
+	    scripted);
+}
+
+static double
+get_iostat_object_storage_scale(nvlist_t *oldnv, nvlist_t *newnv)
+{
+	uint64_t oldtime = 0, newtime = 0, timedelta;
+
+	(void) nvlist_lookup_uint64(oldnv, "Timestamp", &oldtime);
+	(void) nvlist_lookup_uint64(newnv, "Timestamp", &newtime);
+	/*
+	 * If the object agent restarts then counters get reset. When that
+	 * occurs we can ignore the old value.
+	 */
+	if (newtime < oldtime)
+		oldtime = 0;
+
+	timedelta = newtime - oldtime;
+	return ((timedelta == 0) ? 1.0 :(double)NANOSEC / timedelta);
+}
+
+/*
+ * Print object storage statistics
+ */
+static void
+print_iostat_object_storage(nvlist_t *oldnv, nvlist_t *newnv,
+    iostat_cbdata_t *cb)
+{
+	nvlist_t *oldoss = NULL, *newoss;
+	newoss = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS);
+	if (oldnv == NULL ||
+	    nvlist_lookup_nvlist(oldnv, ZPOOL_CONFIG_OBJECT_STORE_STATS,
+	    &oldoss) != 0) {
+		oldoss = fnvlist_alloc();
+	}
+
+	double scale = get_iostat_object_storage_scale(oldoss, newoss);
+
+	print_one_oss(oldoss, newoss, "ReadsGet", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "TxgSyncPut", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "ReadsGet", "total_bytes", cb, scale);
+	print_one_oss(oldoss, newoss, "TxgSyncPut", "total_bytes", cb, scale);
+
+	print_one_oss(oldoss, newoss, "MetadataGet", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "MetadataPut", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "MetadataGet", "total_bytes", cb, scale);
+	print_one_oss(oldoss, newoss, "MetadataPut", "total_bytes", cb, scale);
+
+	print_one_oss(oldoss, newoss, "ReclaimGet", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "ReclaimPut", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "ReclaimGet", "total_bytes", cb, scale);
+	print_one_oss(oldoss, newoss, "ReclaimPut", "total_bytes", cb, scale);
+
+	print_one_oss(oldoss, newoss, "ObjectDelete", "operations", cb, scale);
+}
+
+static void
+print_object_agent_latency(nvlist_t *oldnv, nvlist_t *newnv,
+    iostat_cbdata_t *cb)
+{
+	const char *names[] = {
+		ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
+		ZPOOL_CONFIG_VDEV_TOT_W_LAT_HISTO,
+	};
+	unsigned int width = default_column_width(cb, IOS_LATENCY);
+	enum zfs_nicenum_format format = cb->cb_literal ?
+	    ZFS_NICENUM_RAWTIME : ZFS_NICENUM_TIME;
+
+	struct stat_array *nva =
+	    calc_and_alloc_stats_ex(names, ARRAY_SIZE(names), oldnv, newnv);
+
+	/* Print average latencies on the line */
+	for (int i = 0; i < ARRAY_SIZE(names); i++) {
+		uint64_t val = single_histo_average(nva[i].data, nva[i].count);
+		print_one_stat(val, format, width, cb->cb_scripted);
+	}
+	free_calc_stats(nva, ARRAY_SIZE(names));
+}
+
+static void
+print_iostat_object_latency(nvlist_t *oldnv, nvlist_t *newnv,
+    iostat_cbdata_t *cb)
+{
+	nvlist_t *oldoss = NULL, *newoss;
+	newoss = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS);
+	if (oldnv == NULL ||
+	    nvlist_lookup_nvlist(oldnv, ZPOOL_CONFIG_OBJECT_STORE_STATS,
+	    &oldoss) != 0) {
+		oldoss = fnvlist_alloc();
+	}
+	double scale = get_iostat_object_storage_scale(oldoss, newoss);
+
+	/*  print round-trip latency from object agent (uses zio->io_delay) */
+	print_object_agent_latency(oldnv, newnv, cb);
+
+	print_one_oss(oldoss, newoss, "TotalGet", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "TotalPut", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "TotalGet", "total_bytes", cb, scale);
+	print_one_oss(oldoss, newoss, "TotalPut", "total_bytes", cb, scale);
+
+	/* TODO - this can be based from latency histogram when it's avail */
+	unsigned int width = default_column_width(cb, IOS_OBJECT_LATENCY);
+	if (cb->cb_scripted)
+		printf("\t-\t-");
+	else
+		printf("  %*c  %*c", width, '-', width, '-');
 }
 
 static const char *class_name[] = {
@@ -4808,6 +5011,10 @@ print_vdev_stats(zpool_handle_t *zhp, const char *name, nvlist_t *oldnv,
 		calc_default_iostats(oldvs, newvs, calcvs);
 		print_iostat_default(calcvs, cb, scale);
 	}
+	if (cb->cb_flags & IOS_OBJECT_STORE_M)
+		print_iostat_object_storage(oldnv, newnv, cb);
+	else if (cb->cb_flags & IOS_OBJECT_LATENCY_M)
+		print_iostat_object_latency(oldnv, newnv, cb);
 	if (cb->cb_flags & IOS_LATENCY_M)
 		print_iostat_latency(cb, oldnv, newnv);
 	if (cb->cb_flags & IOS_QUEUES_M)
@@ -5157,6 +5364,9 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 	/* Default stats are always supported, but for completeness.. */
 	if (nvlist_exists(nvroot, ZPOOL_CONFIG_VDEV_STATS))
 		flags |= IOS_DEFAULT_M;
+
+	if (nvlist_exists(nvroot, ZPOOL_CONFIG_OBJECT_STORE_STATS))
+		flags |= IOS_OBJECT_ANY_M;
 
 	/* Get our extended stats nvlist from the main list */
 	if (nvlist_lookup_nvlist(nvroot, ZPOOL_CONFIG_VDEV_STATS_EX,
@@ -5576,6 +5786,7 @@ zpool_do_iostat(int argc, char **argv)
 	boolean_t verbose = B_FALSE;
 	boolean_t latency = B_FALSE, l_histo = B_FALSE, rq_histo = B_FALSE;
 	boolean_t queues = B_FALSE, parsable = B_FALSE, scripted = B_FALSE;
+	boolean_t object_store = B_FALSE;
 	boolean_t omit_since_boot = B_FALSE;
 	boolean_t guid = B_FALSE;
 	boolean_t follow_links = B_FALSE;
@@ -5586,12 +5797,13 @@ zpool_do_iostat(int argc, char **argv)
 
 	/* Used for printing error message */
 	const char flag_to_arg[] = {[IOS_LATENCY] = 'l', [IOS_QUEUES] = 'q',
-	    [IOS_L_HISTO] = 'w', [IOS_RQ_HISTO] = 'r'};
+	    [IOS_L_HISTO] = 'w', [IOS_RQ_HISTO] = 'r', [IOS_OBJECT_STORE] = 'o',
+	    [IOS_OBJECT_LATENCY] = 'o'};
 
 	uint64_t unsupported_flags;
 
 	/* check options */
-	while ((c = getopt(argc, argv, "c:gLPT:vyhplqrwnH")) != -1) {
+	while ((c = getopt(argc, argv, "c:gLPT:voyhplqrwnH")) != -1) {
 		switch (c) {
 		case 'c':
 			if (cmd != NULL) {
@@ -5632,6 +5844,9 @@ zpool_do_iostat(int argc, char **argv)
 			break;
 		case 'v':
 			verbose = B_TRUE;
+			break;
+		case 'o':
+			object_store = B_TRUE;
 			break;
 		case 'p':
 			parsable = B_TRUE;
@@ -5788,6 +6003,10 @@ zpool_do_iostat(int argc, char **argv)
 		cb.cb_flags = IOS_L_HISTO_M;
 	} else if (rq_histo) {
 		cb.cb_flags = IOS_RQ_HISTO_M;
+	} else if (object_store) {
+		cb.cb_flags = IOS_DEFAULT_M;
+		cb.cb_flags |= latency ? IOS_OBJECT_LATENCY_M :
+		    IOS_OBJECT_STORE_M;
 	} else {
 		cb.cb_flags = IOS_DEFAULT_M;
 		if (latency)
@@ -5803,8 +6022,14 @@ zpool_do_iostat(int argc, char **argv)
 	if (unsupported_flags) {
 		uint64_t f;
 		int idx;
-		fprintf(stderr,
-		    gettext("The loaded zfs module doesn't support:"));
+
+		if (cb.cb_flags & IOS_OBJECT_ANY_M)
+			fprintf(stderr,
+			    gettext("The loaded zfs module or one of the"
+			    " specified pools doesn't support:"));
+		else
+			fprintf(stderr,
+			    gettext("The loaded zfs module doesn't support:"));
 
 		/* for each bit set in unsupported_flags */
 		for (f = unsupported_flags; f; f &= ~(1ULL << idx)) {
@@ -5812,7 +6037,11 @@ zpool_do_iostat(int argc, char **argv)
 			fprintf(stderr, " -%c", flag_to_arg[idx]);
 		}
 
-		fprintf(stderr, ".  Try running a newer module.\n");
+		if ((cb.cb_flags & IOS_OBJECT_ANY_M) == 0)
+			fprintf(stderr, ".  Try running a newer module.\n");
+		else
+			fprintf(stderr, ".  Try running a newer module or"
+			    " selecting only object based pools.\n");
 		pool_list_free(list);
 
 		return (1);

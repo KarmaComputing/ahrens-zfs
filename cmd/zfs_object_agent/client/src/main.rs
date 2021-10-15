@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use zettacache::base_types::*;
 use zettaobject::base_types::*;
-use zettaobject::ObjectAccess;
 use zettaobject::Pool;
+use zettaobject::{ObjectAccess, ObjectAccessStatType};
 mod client;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
@@ -409,7 +409,9 @@ async fn do_test_connectivity(object_access: &ObjectAccess) {
     let file = format!("test/test_connectivity_{}", num);
     let content = "test connectivity to S3".as_bytes().to_vec();
 
-    object_access.put_object(file.clone(), content).await;
+    object_access
+        .put_object(file.clone(), content, ObjectAccessStatType::MetadataPut)
+        .await;
     object_access.delete_object(file).await;
 }
 

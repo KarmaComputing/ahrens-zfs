@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_stream::stream;
 use bytes::Bytes;
 use core::time::Duration;
+use enum_map::{Enum, EnumMap};
 use futures::future::Either;
 use futures::stream::{self, StreamExt};
 use futures::{future, Future, TryStreamExt};
@@ -20,7 +21,9 @@ use rusoto_s3::{
 };
 use std::convert::TryFrom;
 use std::error::Error;
+use std::fmt::Formatter;
 use std::iter;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
@@ -52,6 +55,48 @@ lazy_static! {
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
 }
 
+#[derive(Debug, Enum, Clone, Copy)]
+pub enum ObjectAccessStatType {
+    ReadsGet,
+    TxgSyncPut,
+    ReclaimGet,
+    ReclaimPut,
+    MetadataGet,
+    MetadataPut,
+    ObjectDelete,
+}
+
+impl Display for ObjectAccessStatType {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Default)]
+struct ObjectAccessStats {
+    operations: AtomicU64,
+    total_bytes: AtomicU64,
+}
+
+impl ObjectAccessStats {
+    fn record_operation(&self, bytes: u64) {
+        self.operations.fetch_add(1, Ordering::Relaxed);
+        self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
+impl Display for ObjectAccessStats {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{} operations, {} bytes",
+            self.operations.load(Ordering::Relaxed),
+            self.total_bytes.load(Ordering::Relaxed)
+        )?;
+        Ok(())
+    }
+}
+
 pub struct ObjectAccess {
     client: rusoto_s3::S3Client,
     bucket_str: String,
@@ -59,6 +104,8 @@ pub struct ObjectAccess {
     region_str: String,
     endpoint_str: String,
     credentials_profile: Option<String>,
+    access_stats: EnumMap<ObjectAccessStatType, ObjectAccessStats>,
+    timebase: Instant,
 }
 
 #[derive(Debug)]
@@ -221,6 +268,8 @@ impl ObjectAccess {
             region_str: region.to_string(),
             endpoint_str: endpoint.to_string(),
             credentials_profile: None,
+            access_stats: Default::default(),
+            timebase: Instant::now(),
         })
     }
 
@@ -238,10 +287,17 @@ impl ObjectAccess {
             region_str: region_str.to_string(),
             endpoint_str: endpoint.to_string(),
             credentials_profile,
+            access_stats: Default::default(),
+            timebase: Instant::now(),
         })
     }
 
-    pub async fn get_object_impl(&self, key: String, timeout: Option<Duration>) -> Result<Vec<u8>> {
+    pub async fn get_object_impl(
+        &self,
+        key: String,
+        stat_type: ObjectAccessStatType,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>> {
         let msg = format!("get {}", key);
         let v = retry(&msg, timeout, || async {
             let req = GetObjectRequest {
@@ -269,6 +325,7 @@ impl ObjectAccess {
                     Err(OAError::RequestError(e.into()))
                 }
                 Ok(_) => {
+                    self.access_stats[stat_type].record_operation(v.len() as u64);
                     trace!(
                         "{}: got {} bytes of data in {} chunks in {}ms",
                         msg,
@@ -286,8 +343,12 @@ impl ObjectAccess {
         Ok(v)
     }
 
-    pub async fn get_object_uncached(&self, key: String) -> Result<Arc<Vec<u8>>> {
-        let vec = self.get_object_impl(key.clone(), None).await?;
+    pub async fn get_object_uncached(
+        &self,
+        key: String,
+        stat_type: ObjectAccessStatType,
+    ) -> Result<Arc<Vec<u8>>> {
+        let vec = self.get_object_impl(key.clone(), stat_type, None).await?;
         // Note: we *should* have the same data from S3 (in the `vec`) and in
         // the cache, so this invalidation is normally not necessary.  However,
         // in case a bug (or undetected RAM error) resulted in incorrect cached
@@ -297,7 +358,11 @@ impl ObjectAccess {
         Ok(Arc::new(vec))
     }
 
-    pub async fn get_object(&self, key: String) -> Result<Arc<Vec<u8>>> {
+    pub async fn get_object(
+        &self,
+        key: String,
+        stat_type: ObjectAccessStatType,
+    ) -> Result<Arc<Vec<u8>>> {
         let either = {
             // need this block separate so that we can drop the mutex before the .await
             let mut c = CACHE.lock().unwrap();
@@ -311,7 +376,8 @@ impl ObjectAccess {
                         let (tx, rx) = watch::channel::<Option<Arc<Vec<u8>>>>(None);
                         c.reading.insert(key.clone(), rx);
                         Either::Left(async move {
-                            let v = Arc::new(self.get_object_impl(key.clone(), None).await?);
+                            let v =
+                                Arc::new(self.get_object_impl(key.clone(), stat_type, None).await?);
                             let mut myc = CACHE.lock().unwrap();
                             tx.send(Some(v.clone())).unwrap();
                             myc.cache.put(key.to_string(), v.clone());
@@ -452,11 +518,13 @@ impl ObjectAccess {
         &self,
         key: String,
         data: Vec<u8>,
+        stat_type: ObjectAccessStatType,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
         let len = data.len();
         let bytes = Bytes::from(data);
         assert!(!self.readonly);
+        self.access_stats[stat_type].record_operation(len as u64);
         retry(&format!("put {} ({} bytes)", key, len), timeout, || async {
             let my_bytes = bytes.clone();
             let stream = ByteStream::new_with_size(stream! { yield Ok(my_bytes)}, len);
@@ -477,7 +545,7 @@ impl ObjectAccess {
         CACHE.lock().unwrap().cache.pop(&key);
     }
 
-    pub async fn put_object(&self, key: String, data: Vec<u8>) {
+    pub async fn put_object(&self, key: String, data: Vec<u8>, stat_type: ObjectAccessStatType) {
         // Note that we need to PutObject before invalidating the cache.  If a
         // get_object() is called while put_object() is in progress, it may see
         // the old or new value, which is fine.  After put_object() returns,
@@ -485,7 +553,9 @@ impl ObjectAccess {
         // PutObject, a concurrent get_object() could retrieve the old value and
         // add it to the cache, allowing the old value to be read (from the
         // cache) after put_object() returns.
-        self.put_object_impl(key.clone(), data, None).await.unwrap();
+        self.put_object_impl(key.clone(), data, stat_type, None)
+            .await
+            .unwrap();
         Self::invalidate_cache(key);
     }
 
@@ -493,9 +563,12 @@ impl ObjectAccess {
         &self,
         key: String,
         data: Vec<u8>,
+        stat_type: ObjectAccessStatType,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
-        let result = self.put_object_impl(key.clone(), data, timeout).await;
+        let result = self
+            .put_object_impl(key.clone(), data, stat_type, timeout)
+            .await;
         Self::invalidate_cache(key);
         result
     }
@@ -540,6 +613,9 @@ impl ObjectAccess {
                 })
                 .await
                 .unwrap();
+                self.access_stats[ObjectAccessStatType::ObjectDelete]
+                    .operations
+                    .fetch_add(chunk.len() as u64, Ordering::Relaxed);
             })
             .await;
     }
@@ -562,5 +638,69 @@ impl ObjectAccess {
 
     pub fn readonly(&self) -> bool {
         self.readonly
+    }
+
+    fn sum_stats(&self, stat_types: &[ObjectAccessStatType]) -> HashMap<String, u64> {
+        let mut total = HashMap::new();
+
+        total.insert(
+            "operations".into(),
+            stat_types
+                .iter()
+                .map(|&stat_type| {
+                    self.access_stats[stat_type]
+                        .operations
+                        .load(Ordering::Relaxed)
+                })
+                .sum(),
+        );
+        total.insert(
+            "total_bytes".into(),
+            stat_types
+                .iter()
+                .map(|&stat_type| {
+                    self.access_stats[stat_type]
+                        .total_bytes
+                        .load(Ordering::Relaxed)
+                })
+                .sum(),
+        );
+
+        total
+    }
+
+    pub fn collect_stats(&self) -> (HashMap<String, HashMap<String, u64>>, u64) {
+        let mut outer = HashMap::new();
+        let order = Ordering::Relaxed;
+
+        for (t, s) in self.access_stats.iter() {
+            let mut inner = HashMap::new();
+            inner.insert("operations".into(), s.operations.load(order));
+            inner.insert("total_bytes".into(), s.total_bytes.load(order));
+            outer.insert(t.to_string(), inner);
+        }
+
+        // We know that the elapsed time since ObjectAccess was initialized fits in u64
+        let timestamp = u64::try_from(self.timebase.elapsed().as_nanos()).unwrap();
+
+        // Sum the Gets and Puts into a total for each category
+        outer.insert(
+            "TotalGet".into(),
+            self.sum_stats(&[
+                ObjectAccessStatType::ReadsGet,
+                ObjectAccessStatType::MetadataGet,
+                ObjectAccessStatType::ReclaimGet,
+            ]),
+        );
+        outer.insert(
+            "TotalPut".into(),
+            self.sum_stats(&[
+                ObjectAccessStatType::TxgSyncPut,
+                ObjectAccessStatType::MetadataPut,
+                ObjectAccessStatType::ReclaimPut,
+            ]),
+        );
+
+        (outer, timestamp)
     }
 }

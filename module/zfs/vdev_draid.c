@@ -2138,7 +2138,7 @@ vdev_draid_xlate(vdev_t *cvd, const range_seg64_t *logical_rs,
  * Add dRAID specific fields to the config nvlist.
  */
 static void
-vdev_draid_config_generate(vdev_t *vd, nvlist_t *nv)
+vdev_draid_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 {
 	ASSERT3P(vd->vdev_ops, ==, &vdev_draid_ops);
 	vdev_draid_config_t *vdc = vd->vdev_tsd;
@@ -2749,7 +2749,7 @@ vdev_draid_spare_fini(vdev_t *vd)
 }
 
 static void
-vdev_draid_spare_config_generate(vdev_t *vd, nvlist_t *nv)
+vdev_draid_spare_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 {
 	vdev_draid_spare_t *vds = vd->vdev_tsd;
 

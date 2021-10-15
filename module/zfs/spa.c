@@ -5593,6 +5593,26 @@ spa_get_stats(const char *name, nvlist_t **config,
 	}
 
 	if (spa != NULL) {
+		/*
+		 * For object based pools copy the vdev stats into the root
+		 */
+		if (*config != NULL && spa_is_object_based(spa)) {
+			nvlist_t *nvroot, **child, *stats;
+			uint_t children;
+
+			nvroot = fnvlist_lookup_nvlist(*config,
+			    ZPOOL_CONFIG_VDEV_TREE);
+			VERIFY(nvlist_lookup_nvlist_array(nvroot,
+			    ZPOOL_CONFIG_CHILDREN, &child, &children) == 0 &&
+			    children > 0);
+			if (nvlist_lookup_nvlist(child[0],
+			    ZPOOL_CONFIG_OBJECT_STORE_STATS, &stats) == 0) {
+				fnvlist_add_nvlist(nvroot,
+				    ZPOOL_CONFIG_OBJECT_STORE_STATS, stats);
+			}
+
+		}
+
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 		spa_close(spa, FTAG);
 	}

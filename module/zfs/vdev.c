@@ -4686,12 +4686,24 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 			}
 
 			if (zio->io_delta && zio->io_delay) {
-				vsx->vsx_queue_histo[priority]
-				    [L_HISTO(zio->io_delta - zio->io_delay)]++;
-				vsx->vsx_disk_histo[type]
-				    [L_HISTO(zio->io_delay)]++;
 				vsx->vsx_total_histo[type]
 				    [L_HISTO(zio->io_delta)]++;
+
+				hrtime_t qdelta = zio->io_delta - zio->io_delay;
+
+				/* object store pools don't use vdev queues */
+				if (vdev_is_object_based(vd)) {
+					if (priority == ZIO_PRIORITY_SCRUB ||
+					    priority == ZIO_PRIORITY_TRIM) {
+						vsx->vsx_queue_histo[priority]
+						    [L_HISTO(qdelta)]++;
+					}
+				} else {
+					vsx->vsx_queue_histo[priority]
+					    [L_HISTO(qdelta)]++;
+					vsx->vsx_disk_histo[type]
+					    [L_HISTO(zio->io_delay)]++;
+				}
 			}
 		}
 

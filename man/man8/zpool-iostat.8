@@ -166,6 +166,20 @@ This can be used to look up the current block device name regardless of the
 path used to open it.
 .It Fl n
 Print headers only once when passed
+.It Fl o
+Display I/O statistics for object storage based pools.
+This includes operations and throughput for the following categories:
+.Bl -tag -width Ds
+.It Sy object_agent_io
+read/write requests to the object agent.
+.It Sy object_store_data
+data object get/put requests to object store, a result of object_agent_io
+(requests from kernel to object store)
+.It Sy object_store_metadata
+object store specific metadata get/put requests to object store.
+.It Sy object_store_reclaim
+freed data blocks from object store.
+.El
 .It Fl p
 Display numbers in parsable (exact) values.
 Time values are in nanoseconds.

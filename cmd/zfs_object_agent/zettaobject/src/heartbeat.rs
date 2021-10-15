@@ -1,4 +1,4 @@
-use crate::object_access::{OAError, ObjectAccess};
+use crate::object_access::{OAError, ObjectAccess, ObjectAccessStatType};
 use anyhow::Context;
 use lazy_static::lazy_static;
 use log::{debug, info, trace, warn};
@@ -36,7 +36,9 @@ impl HeartbeatPhys {
     }
 
     pub async fn get(object_access: &ObjectAccess, id: Uuid) -> anyhow::Result<Self> {
-        let buf = object_access.get_object_impl(Self::key(id), None).await?;
+        let buf = object_access
+            .get_object_impl(Self::key(id), ObjectAccessStatType::MetadataGet, None)
+            .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
         debug!("got {:#?}", this);
@@ -53,7 +55,12 @@ impl HeartbeatPhys {
         trace!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
-            .put_object_timed(Self::key(self.id), buf, timeout)
+            .put_object_timed(
+                Self::key(self.id),
+                buf,
+                ObjectAccessStatType::MetadataPut,
+                timeout,
+            )
             .await
     }
 
