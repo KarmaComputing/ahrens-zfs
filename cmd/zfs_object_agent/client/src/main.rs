@@ -4,6 +4,7 @@ use clap::Arg;
 use clap::SubCommand;
 use client::Client;
 use futures::stream::StreamExt;
+use git_version::git_version;
 use nvpair::*;
 use rand::prelude::*;
 use rusoto_core::ByteStream;
@@ -33,6 +34,8 @@ const REGION: &str = "us-west-2";
 const BUCKET_NAME: &str = "cloudburst-data-2";
 const POOL_NAME: &str = "testpool";
 const POOL_GUID: u64 = 1234;
+
+static GIT_VERSION: &str = git_version!();
 
 async fn do_rusoto_provider<P>(credentials_provider: P, file: &str)
 where
@@ -436,7 +439,7 @@ async fn test_connectivity(object_access: &ObjectAccess) -> Result<(), Box<dyn E
 async fn main() {
     let matches = clap::App::new("zoa_test")
         .about("ZFS object agent test")
-        .version("1.0")
+        .version(GIT_VERSION)
         .arg(
             Arg::with_name("endpoint")
                 .short("e")

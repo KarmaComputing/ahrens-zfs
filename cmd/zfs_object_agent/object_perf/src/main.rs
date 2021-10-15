@@ -1,6 +1,7 @@
 use clap::AppSettings;
 use clap::Arg;
 use clap::SubCommand;
+use git_version::git_version;
 use std::time::Duration;
 use uuid::Uuid;
 use zettaobject::ObjectAccess;
@@ -10,12 +11,14 @@ const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
 const REGION: &str = "us-west-2";
 const BUCKET_NAME: &str = "cloudburst-data-2";
 
+static GIT_VERSION: &str = git_version!();
+
 #[tokio::main]
 async fn main() {
     let matches = clap::App::new("zfs_object_perf")
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .about("ZFS object storage performance tests")
-        .version("1.0")
+        .version(GIT_VERSION)
         .arg(
             Arg::with_name("endpoint")
                 .short("e")

@@ -1,9 +1,13 @@
 use clap::Arg;
+use git_version::git_version;
 use log::*;
+
+static GIT_VERSION: &str = git_version!();
 
 fn main() {
     let matches = clap::App::new("ZFS Object Agent")
         .about("Enables the ZFS kernel module talk to S3-protocol object storage")
+        .version(GIT_VERSION)
         .arg(
             Arg::with_name("verbosity")
                 .short("v")
@@ -69,7 +73,8 @@ fn main() {
     }
 
     error!(
-        "Starting ZFS Object Agent.  Local timezone is {}",
+        "Starting ZFS Object Agent ({}).  Local timezone is {}",
+        GIT_VERSION,
         chrono::Local::now().format("%Z (%:z)")
     );
 

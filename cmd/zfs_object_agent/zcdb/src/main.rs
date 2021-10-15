@@ -1,8 +1,11 @@
 use clap::AppSettings;
 use clap::Arg;
 use clap::SubCommand;
+use git_version::git_version;
 use zettacache::DumpStructuresOptions;
 use zettacache::ZettaCacheDBCommand;
+
+static GIT_VERSION: &str = git_version!();
 
 #[tokio::main]
 async fn main() {
@@ -19,7 +22,7 @@ async fn main() {
     let matches = clap::App::new("zcachedb")
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .about("ZFS ZettaCache Debugger")
-        .version("1.0")
+        .version(GIT_VERSION)
         .arg(
             Arg::with_name("device")
                 .help("ZettaCache Device")
