@@ -1,6 +1,6 @@
 use crate::base_types::*;
 use crate::block_access::BlockAccess;
-use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::{ExtentAllocator, ExtentAllocatorBuilder};
 use crate::space_map::{SpaceMap, SpaceMapEntry, SpaceMapPhys};
 use crate::zettacache::DEFAULT_SLAB_SIZE;
 use lazy_static::lazy_static;
@@ -1315,6 +1315,11 @@ impl BlockAllocatorPhys {
             slabs: slabs.into(),
             slab_buckets: DEFAULT_SLAB_BUCKETS.clone(),
         }
+    }
+
+    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+        self.spacemap.claim(builder);
+        self.spacemap_next.claim(builder);
     }
 }
 

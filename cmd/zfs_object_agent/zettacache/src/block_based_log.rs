@@ -2,6 +2,7 @@ use crate::base_types::*;
 use crate::block_access::BlockAccess;
 use crate::block_access::EncodeType;
 use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::ExtentAllocatorBuilder;
 use anyhow::Context;
 use async_stream::stream;
 use futures::stream::FuturesUnordered;
@@ -26,7 +27,7 @@ use util::get_tunable;
 
 lazy_static! {
     // XXX maybe this is wasteful for the smaller logs?
-    static ref DEFAULT_EXTENT_SIZE: u64 = get_tunable("default_extent_size", 128 * 1024 * 1024);
+    pub static ref DEFAULT_EXTENT_SIZE: u64 = get_tunable("default_extent_size", 128 * 1024 * 1024);
     static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 200);
 }
 
@@ -59,11 +60,17 @@ impl<T: BlockBasedLogEntry> Default for BlockBasedLogPhys<T> {
 }
 
 impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
-    pub fn clear(&mut self, extent_allocator: Arc<ExtentAllocator>) {
+    pub fn clear(&mut self, extent_allocator: &ExtentAllocator) {
         for extent in self.extents.values() {
             extent_allocator.free(extent);
         }
         *self = Default::default();
+    }
+
+    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+        for extent in self.extents.values() {
+            builder.claim(extent);
+        }
     }
 
     pub fn iter_chunks(
@@ -147,6 +154,13 @@ impl<T: BlockBasedLogEntry> Default for BlockBasedLogWithSummaryPhys<T> {
     }
 }
 
+impl<T: BlockBasedLogEntry> BlockBasedLogWithSummaryPhys<T> {
+    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+        self.this.claim(builder);
+        self.chunk_summary.claim(builder);
+    }
+}
+
 pub trait BlockBasedLogEntry: 'static + OnDisk + Copy + Clone + Unpin + Send + Sync {}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -186,9 +200,6 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         extent_allocator: Arc<ExtentAllocator>,
         phys: BlockBasedLogPhys<T>,
     ) -> BlockBasedLog<T> {
-        for (_offset, extent) in phys.extents.iter() {
-            extent_allocator.claim(extent);
-        }
         BlockBasedLog {
             block_access,
             extent_allocator,
@@ -288,7 +299,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
 
     pub fn clear(&mut self) {
         self.pending_entries.clear();
-        self.phys.clear(self.extent_allocator.clone());
+        self.phys.clear(&self.extent_allocator);
     }
 
     fn next_write_location(&self) -> Extent {

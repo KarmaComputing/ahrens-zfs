@@ -4,6 +4,7 @@ use crate::block_access::*;
 use crate::block_allocator::SlabId;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::{
     base_types::OnDisk,
     block_based_log::{BlockBasedLog, BlockBasedLogEntry},
@@ -58,6 +59,10 @@ impl SpaceMapPhys {
             coverage: SpaceMapExtent { offset, size },
             alloc_entries: 0,
         }
+    }
+
+    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+        self.log.claim(builder);
     }
 }
 

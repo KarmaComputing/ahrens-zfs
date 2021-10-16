@@ -13,8 +13,6 @@ pub struct ExtentAllocatorPhys {
 }
 
 pub struct ExtentAllocator {
-    // XXX there's no real point of having a mutex here since this is only
-    // accessed under the big zettacache lock
     state: std::sync::Mutex<ExtentAllocatorState>,
 }
 
@@ -24,19 +22,42 @@ struct ExtentAllocatorState {
     freeing: RangeTree, // not yet available for reallocation until this checkpoint completes
 }
 
-/// Note: no on-disk representation.  Allocated extents must be .claim()ed
-/// before .allocate()ing additional extents.
-impl ExtentAllocator {
-    pub fn open(phys: &ExtentAllocatorPhys) -> ExtentAllocator {
+pub struct ExtentAllocatorBuilder {
+    phys: ExtentAllocatorPhys,
+    allocatable: RangeTree,
+}
+
+impl ExtentAllocatorBuilder {
+    pub fn new(phys: ExtentAllocatorPhys) -> ExtentAllocatorBuilder {
         let mut metadata_allocatable = RangeTree::new();
         metadata_allocatable.add(
             phys.first_valid_offset,
             phys.last_valid_offset - phys.first_valid_offset,
         );
+        ExtentAllocatorBuilder {
+            phys,
+            allocatable: metadata_allocatable,
+        }
+    }
+
+    pub fn claim(&mut self, extent: &Extent) {
+        self.allocatable.remove(extent.location.offset, extent.size);
+    }
+
+    pub fn allocatable_bytes(&self) -> u64 {
+        self.allocatable.space()
+    }
+}
+
+impl ExtentAllocator {
+    /// Since the on-disk representation doesn't indicate which extents are
+    /// allocated, they must all be .claim()ed first, via the
+    /// ExtentAllocatorBuilder.
+    pub fn open(builder: ExtentAllocatorBuilder) -> ExtentAllocator {
         ExtentAllocator {
             state: std::sync::Mutex::new(ExtentAllocatorState {
-                phys: *phys,
-                allocatable: metadata_allocatable,
+                phys: builder.phys,
+                allocatable: builder.allocatable,
                 freeing: RangeTree::new(),
             }),
         }
@@ -46,6 +67,10 @@ impl ExtentAllocator {
         self.state.lock().unwrap().phys
     }
 
+    pub fn allocatable_bytes(&self) -> u64 {
+        self.state.lock().unwrap().allocatable.space()
+    }
+
     pub fn checkpoint_done(&self) {
         let mut state = self.state.lock().unwrap();
 
@@ -53,14 +78,6 @@ impl ExtentAllocator {
         for (start, size) in mem::take(&mut state.freeing).iter() {
             state.allocatable.add(*start, *size);
         }
-    }
-
-    pub fn claim(&self, extent: &Extent) {
-        self.state
-            .lock()
-            .unwrap()
-            .allocatable
-            .remove(extent.location.offset, extent.size);
     }
 
     pub fn allocate(&self, min_size: u64, max_size: u64) -> Extent {
@@ -91,7 +108,7 @@ impl ExtentAllocator {
             // XXX the block allocator will keep using this, and overwriting our
             // metadata, until we notify it.
             panic!(
-                "no extents of at least {} bytes available; overwriting {} bytes of data blocks at offset {}",
+                "no extents of at least {} bytes available; need to overwrite {} bytes of data blocks at offset {}",
                 min_size, max_size, state.phys.last_valid_offset
             );
         } else {

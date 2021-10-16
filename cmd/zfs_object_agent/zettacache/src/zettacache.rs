@@ -3,8 +3,10 @@ use crate::block_access::*;
 use crate::block_allocator::zcachedb_dump_spacemaps;
 use crate::block_allocator::BlockAllocator;
 use crate::block_allocator::BlockAllocatorPhys;
+use crate::block_based_log;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::extent_allocator::ExtentAllocatorPhys;
 use crate::index::*;
 use crate::DumpStructuresOptions;
@@ -108,11 +110,15 @@ impl ZettaCheckpointPhys {
         this
     }
 
-    /*
-    fn all_logs(&self) -> Vec<&BlockBasedLogPhys> {
-        vec![&self.index, &self.chunk_summary, &self.operation_log]
+    fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+        self.block_allocator.claim(builder);
+        self.index.claim(builder);
+        self.operation_log.claim(builder);
+        if let Some((operation_log, index)) = self.merge_progress.as_ref() {
+            operation_log.claim(builder);
+            index.claim(builder);
+        }
     }
-    */
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -599,7 +605,12 @@ impl ZettaCache {
             println!("{:#?}", checkpoint);
         }
 
-        let extent_allocator = Arc::new(ExtentAllocator::open(&checkpoint.extent_allocator));
+        let mut builder = ExtentAllocatorBuilder::new(checkpoint.extent_allocator);
+        // We should be able to get away without claiming the metadata space,
+        // since we aren't allocating anything, but we may also want to do this
+        // for verification (e.g. that there aren't overlapping Extents).
+        checkpoint.claim(&mut builder);
+        let extent_allocator = Arc::new(ExtentAllocator::open(builder));
 
         if opts.dump_spacemaps {
             zcachedb_dump_spacemaps(
@@ -646,7 +657,10 @@ impl ZettaCache {
             metadata_start,
             checkpoint.extent_allocator.first_valid_offset
         );
-        let extent_allocator = Arc::new(ExtentAllocator::open(&checkpoint.extent_allocator));
+
+        let mut builder = ExtentAllocatorBuilder::new(checkpoint.extent_allocator);
+        checkpoint.claim(&mut builder);
+        let extent_allocator = Arc::new(ExtentAllocator::open(builder));
 
         let operation_log = BlockBasedLog::open(
             block_access.clone(),
@@ -1512,6 +1526,24 @@ impl ZettaCacheState {
             merge_progress,
         };
 
+        // There may be some metadata space allocated but not yet part of the
+        // checkpoint, because the merge task runs concurrently with this and
+        // may have allocated an extent which it hasn't yet told the checkpoint
+        // about.  However, the amount of this space should be limited.  If
+        // there's a large amount of space that's not accounted for in the
+        // checkpoint, it likely indicates a leak, e.g. a BlockBasedLog is no
+        // longer in the Checkpoint but wasn't .clear()'ed.
+        {
+            let mut checkpoint_extents = ExtentAllocatorBuilder::new(checkpoint.extent_allocator);
+            checkpoint.claim(&mut checkpoint_extents);
+            let checkpoint_bytes = checkpoint_extents.allocatable_bytes();
+            let allocator_bytes = self.extent_allocator.allocatable_bytes();
+            if allocator_bytes + *block_based_log::DEFAULT_EXTENT_SIZE * 4 < checkpoint_bytes {
+                warn!("possible leak of metadata space: {}MB available according to checkpoint but not in memory",
+                    (checkpoint_bytes - allocator_bytes) / 1024 / 1024);
+            }
+        }
+
         let mut checkpoint_location = self.super_phys.last_checkpoint_extent.location
             + self.super_phys.last_checkpoint_extent.size;
 
@@ -1678,7 +1710,7 @@ impl ZettaCacheState {
         merging_state
             .old_operation_log_phys
             .clone()
-            .clear(self.extent_allocator.clone());
+            .clear(&self.extent_allocator);
 
         // Move the "start" of the zettacache state histogram to reflect the new index
         self.atime_histogram.reset_first(next_index.first_atime());

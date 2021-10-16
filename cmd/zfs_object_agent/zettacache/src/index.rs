@@ -2,6 +2,7 @@ use crate::base_types::*;
 use crate::block_access::*;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::zettacache::AtimeHistogramPhys;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,10 @@ impl ZettaCacheIndexPhys {
             atime_histogram: AtimeHistogramPhys::new(min_atime),
             log: Default::default(),
         }
+    }
+
+    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+        self.log.claim(builder);
     }
 }
 
