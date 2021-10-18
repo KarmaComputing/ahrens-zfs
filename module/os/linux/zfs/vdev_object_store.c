@@ -48,6 +48,13 @@ struct sockaddr_un zfs_root_socket = {
 	AF_UNIX, "/etc/zfs/zfs_root_socket"
 };
 
+/*
+ * Free in batches of 100,000 blocks, to limit memory usage.  Note that
+ * the Agent accepts requests of up to ~20MB, and each block uses 12 bytes,
+ * so the max "free blocks" request is ~1.2MB.
+ */
+int vdev_object_store_max_frees = 100000;
+
 typedef enum {
 	VOS_SOCK_CLOSED = (1 << 0),
 	VOS_SOCK_SHUTTING_DOWN = (1 << 1),
@@ -118,6 +125,7 @@ typedef struct vdev_object_store {
 	uint64_t vos_flush_point;
 
 	list_t vos_free_list;
+	uint64_t vos_free_list_len;
 } vdev_object_store_t;
 
 /*
@@ -474,36 +482,67 @@ object_store_stop_agent(vdev_t *vd)
 }
 
 static int
+agent_free_blocks_impl(vdev_object_store_t *vos,
+    uint64_t *blkids, uint32_t *sizes, int num)
+{
+	nvlist_t *nv = fnvlist_alloc();
+	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FREE_BLOCKS);
+	fnvlist_add_uint64_array(nv, AGENT_BLKID, blkids, num);
+	fnvlist_add_uint32_array(nv, AGENT_SIZE, sizes, num);
+	int err = agent_request(vos, nv, FTAG);
+	fnvlist_free(nv);
+	if (err == 0) {
+		zfs_dbgmsg("agent_free_blocks freed %d blocks", num);
+	} else {
+		zfs_dbgmsg("agnet_free_blocks failed to send: %d", err);
+	}
+	return (err);
+}
+
+static int
 agent_free_blocks(vdev_object_store_t *vos)
 {
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 
-	int blocks_freed = 0;
+	int buf_len = MIN(vos->vos_free_list_len, vdev_object_store_max_frees);
+	if (buf_len == 0)
+		return (0);
+	int err = 0;
+
+	uint64_t *blkid_array =
+	    vmem_alloc(buf_len * sizeof (*blkid_array), KM_SLEEP);
+	uint32_t *size_array =
+	    vmem_alloc(buf_len * sizeof (*size_array), KM_SLEEP);
+
+	int num_freed = 0;
 	for (object_store_free_block_t *osfb = list_head(&vos->vos_free_list);
 	    osfb != NULL; osfb = list_next(&vos->vos_free_list, osfb)) {
-
-		blocks_freed++;
 		uint64_t blockid = osfb->osfb_offset >> 9;
-		nvlist_t *nv = fnvlist_alloc();
-		fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FREE_BLOCK);
+		blkid_array[num_freed] = blockid;
+		size_array[num_freed] = osfb->osfb_size;
+		num_freed++;
 
-		fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
-		fnvlist_add_uint64(nv, AGENT_SIZE, osfb->osfb_size);
 		if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 			zfs_dbgmsg("agent_free_blocks(blkid=%llu, asize=%llu)",
 			    (u_longlong_t)blockid,
 			    (u_longlong_t)osfb->osfb_size);
 		}
-		int err = agent_request(vos, nv, FTAG);
-		if (err != 0) {
-			fnvlist_free(nv);
-			zfs_dbgmsg("agnet_free_block failed to send: %d", err);
-			return (err);
+
+		if (num_freed == buf_len) {
+			err = agent_free_blocks_impl(vos,
+			    blkid_array, size_array, num_freed);
+			num_freed = 0;
+			if (err != 0)
+				break;
 		}
-		fnvlist_free(nv);
 	}
-	zfs_dbgmsg("agent_free_blocks freed %d blocks", blocks_freed);
-	return (0);
+	if (num_freed != 0) {
+		err = agent_free_blocks_impl(vos,
+		    blkid_array, size_array, num_freed);
+	}
+	vmem_free(blkid_array, buf_len * sizeof (*blkid_array));
+	vmem_free(size_array, buf_len * sizeof (*size_array));
+	return (err);
 }
 
 static void
@@ -910,10 +949,14 @@ object_store_end_txg(vdev_t *vd, nvlist_t *config, uint64_t txg)
 	agent_wait_serial(vos, VOS_SERIAL_END_TXG);
 
 	object_store_free_block_t *osfb;
+	uint64_t len = 0;
 	while ((osfb = list_remove_head(&vos->vos_free_list)) != NULL) {
 		kmem_free(osfb, sizeof (object_store_free_block_t));
+		len++;
 	}
 	ASSERT(list_is_empty(&vos->vos_free_list));
+	ASSERT3U(len, ==, vos->vos_free_list_len);
+	vos->vos_free_list_len = 0;
 	vos->vos_send_txg_selector = VOS_TXG_NONE;
 }
 
@@ -933,6 +976,7 @@ object_store_free_block(vdev_t *vd, uint64_t offset, uint64_t asize)
 	osfb->osfb_offset = offset;
 	osfb->osfb_size = asize;
 	list_insert_tail(&vos->vos_free_list, osfb);
+	vos->vos_free_list_len++;
 }
 
 void

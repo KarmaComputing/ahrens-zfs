@@ -13,7 +13,6 @@ use cstr_argument::CStrArgument;
 use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
-use std::convert::TryFrom;
 use std::sync::Arc;
 use util::get_tunable;
 use util::maybe_die_with;
@@ -72,7 +71,7 @@ impl RootConnectionState {
         server.register_handler("flush writes", Box::new(Self::flush_writes));
         server.register_handler("end txg", Box::new(Self::end_txg));
         server.register_handler("write block", Box::new(Self::write_block));
-        server.register_handler("free block", Box::new(Self::free_block));
+        server.register_handler("free blocks", Box::new(Self::free_blocks));
         server.register_handler("read block", Box::new(Self::read_block));
         server.register_handler("get stats", Box::new(Self::get_stats));
         server.register_handler("close pool", Box::new(Self::close_pool));
@@ -314,14 +313,14 @@ impl RootConnectionState {
         }))
     }
 
-    fn free_block(&mut self, nvl: NvList) -> HandlerReturn {
+    fn free_blocks(&mut self, nvl: NvList) -> HandlerReturn {
         trace!("got request: {:?}", nvl);
-        let block = BlockId(nvl.lookup_uint64("block")?);
-        let size = u32::try_from(nvl.lookup_uint64("size")?)?;
+        let blocks = u64_array_value(&nvl, "block")?;
+        let sizes = u32_array_value(&nvl, "size")?;
 
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
-        pool.free_block(block, size);
-        maybe_die_with(|| format!("after free block request: {:?}", block));
+        pool.free_blocks(blocks, sizes);
+        maybe_die_with(|| "after free block request".to_string());
         handler_return_ok(None)
     }
 
@@ -482,8 +481,8 @@ where
     }
 }
 
-/// Get the BoolV type value, or if not present then default to false.
-/// Return Err if value is present but not BoolV type.
+/// Get the uint8_array type value.
+/// Return Err if value is not present, or not the expected type.
 fn u8_array_value<S>(nvl: &NvListRef, name: S) -> Result<&[u8]>
 where
     S: CStrArgument,
@@ -493,5 +492,33 @@ where
         Ok(slice)
     } else {
         Err(anyhow!("pair {:?} not expected type (uint8_array)", pair))
+    }
+}
+
+/// Get the uint32_array type value.
+/// Return Err if value is not present, or not the expected type.
+fn u32_array_value<S>(nvl: &NvListRef, name: S) -> Result<&[u32]>
+where
+    S: CStrArgument,
+{
+    let pair = nvl.lookup(name)?;
+    if let NvData::Uint32Array(slice) = pair.data() {
+        Ok(slice)
+    } else {
+        Err(anyhow!("pair {:?} not expected type (uint32_array)", pair))
+    }
+}
+
+/// Get the uint64_array type value.
+/// Return Err if value is not present, or not the expected type.
+fn u64_array_value<S>(nvl: &NvListRef, name: S) -> Result<&[u64]>
+where
+    S: CStrArgument,
+{
+    let pair = nvl.lookup(name)?;
+    if let NvData::Uint64Array(slice) = pair.data() {
+        Ok(slice)
+    } else {
+        Err(anyhow!("pair {:?} not expected type (uint64_array)", pair))
     }
 }

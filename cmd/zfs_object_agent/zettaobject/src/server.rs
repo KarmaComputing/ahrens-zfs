@@ -10,6 +10,7 @@
 use anyhow::anyhow;
 use anyhow::Result;
 use futures::{future, Future, FutureExt};
+use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvEncoding, NvList};
 use std::collections::HashMap;
@@ -19,7 +20,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
+use util::get_tunable;
 use util::From64;
+
+lazy_static! {
+    // max zfs block size is 16MB
+    pub static ref UNREASONABLE_REQUEST_SIZE: u64 =
+        get_tunable("unreasonable_request_size", 20_000_000);
+}
 
 // Ss: ServerState (consumer's state associated with the server)
 // Cs: ConnectionState (consumer's state associated with the connection)
@@ -126,15 +134,12 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
         // XXX kernel sends this as host byte order
         let len64 = input.read_u64_le().await?;
         //trace!("got request len: {}", len64);
-        if len64 > 20_000_000 {
-            // max zfs block size is 16MB
+        if len64 > *UNREASONABLE_REQUEST_SIZE {
             panic!("got unreasonable request length {} ({:#x})", len64, len64);
         }
 
         let mut v = Vec::new();
-        // XXX would be nice if we didn't have to zero it out.  Should be able
-        // to do that using read_buf(), treating the Vec as a BufMut, but will
-        // require multiple calls to do the equivalent of read_exact().
+        // XXX Would be nice if we didn't have to zero it out.
         v.resize(usize::from64(len64), 0);
         input.read_exact(v.as_mut()).await?;
         let nvl = NvList::try_unpack(v.as_ref()).unwrap();

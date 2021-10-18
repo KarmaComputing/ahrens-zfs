@@ -1683,16 +1683,22 @@ impl Pool {
         }
     }
 
-    pub fn free_block(&self, block: BlockId, size: u32) {
+    pub fn free_blocks(&self, blocks: &[u64], sizes: &[u32]) {
         // the syncing_state is only held from the thread that owns the Pool
         // (i.e. this thread) and from end_txg(). It's not allowed to call this
         // function while in the middle of an end_txg(), so the lock must not be
         // held. XXX change this to return an error to the client
+        assert_eq!(blocks.len(), sizes.len());
         self.state.with_syncing_state(|syncing_state| {
-            syncing_state.log_free(
-                PendingFreesLogEntry { block, size },
-                &self.state.object_block_map,
-            )
+            for (&block, &size) in blocks.iter().zip(sizes.iter()) {
+                syncing_state.log_free(
+                    PendingFreesLogEntry {
+                        block: BlockId(block),
+                        size,
+                    },
+                    &self.state.object_block_map,
+                );
+            }
         })
     }
 
