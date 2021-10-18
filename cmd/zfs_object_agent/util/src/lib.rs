@@ -21,4 +21,6 @@ pub use mutex_ext::MutexExt;
 pub use range_tree::RangeTree;
 pub use tunable::get_tunable;
 pub use tunable::read_tunable_config;
+pub use vec_ext::AlignedBytes;
+pub use vec_ext::AlignedVec;
 pub use vec_ext::TerseVec;

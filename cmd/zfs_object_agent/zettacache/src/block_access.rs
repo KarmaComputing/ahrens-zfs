@@ -3,18 +3,20 @@ use crate::base_types::Extent;
 use anyhow::{anyhow, Result};
 use bincode::Options;
 use lazy_static::lazy_static;
+use libc::c_void;
 use log::*;
 use metered::common::*;
 use metered::hdr_histogram::AtomicHdrHistogram;
 use metered::metered;
 use metered::time_source::StdInstantMicros;
-use more_asserts::*;
+use nix::errno::Errno;
 use nix::sys::stat::SFlag;
 use num::Num;
 use num::NumCast;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
+use std::convert::TryInto;
 use std::io::Read;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
@@ -26,6 +28,8 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use util::get_tunable;
+use util::AlignedBytes;
+use util::AlignedVec;
 use util::From64;
 
 lazy_static! {
@@ -81,7 +85,7 @@ const CUSTOM_OFLAGS: i32 = 0;
 
 // XXX this is very thread intensive.  On Linux, we can use "glommio" to use
 // io_uring for much lower overheads.  Or SPDK (which can use io_uring or nvme
-// hardware directly).  Or at least use O_DIRECT.
+// hardware directly).
 #[metered(registry=BlockAccessMetrics)]
 impl BlockAccess {
     pub async fn new(disk_path: &str, readonly: bool) -> BlockAccess {
@@ -143,32 +147,33 @@ impl BlockAccess {
     }
 
     // offset and length must be sector-aligned
-    // maybe this should return Bytes?
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    pub async fn read_raw(&self, extent: Extent) -> Vec<u8> {
+    pub async fn read_raw(&self, extent: Extent) -> AlignedBytes {
         assert_eq!(extent.size, self.round_up_to_sector(extent.size));
         let fd = self.disk.as_raw_fd();
         let sector_size = self.sector_size;
         let begin = Instant::now();
         let _permit = self.outstanding_reads.acquire().await.unwrap();
-        let vec = tokio::task::spawn_blocking(move || {
-            let mut v: Vec<u8> = Vec::new();
-            // XXX use unsafe code to avoid double initializing it?
-            // XXX directio requires the pointer to be sector-aligned, requiring this grossness
-            v.resize(usize::from64(extent.size) + sector_size, 0);
-            let aligned = unsafe {
-                let ptr = v.as_mut_ptr() as usize;
-                let aligned_ptr = (ptr + sector_size - 1) / sector_size * sector_size;
-                assert_le!(aligned_ptr - v.as_mut_ptr() as usize, sector_size);
-                std::slice::from_raw_parts_mut(aligned_ptr as *mut u8, usize::from64(extent.size))
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut v = AlignedVec::with_capacity(usize::from64(extent.size), sector_size);
+            // By using the unsafe libc::pread() instead of
+            // nix::sys::uio::pread(), we avoid the cost of zeroing out the
+            // vec's buffer.
+            unsafe {
+                let res = libc::pread(
+                    fd,
+                    v.as_mut_ptr() as *mut c_void,
+                    extent.size.try_into().unwrap(),
+                    extent.location.offset.try_into().unwrap(),
+                );
+                let num_bytes_read = usize::try_from(Errno::result(res).unwrap()).unwrap();
+                v.set_len(num_bytes_read);
             };
-            nix::sys::uio::pread(fd, aligned, i64::try_from(extent.location.offset).unwrap())
-                .unwrap();
-            // XXX copying again!
-            aligned.to_owned()
+            assert_eq!(v.len() as u64, extent.size);
+            v.into()
         })
         .await
         .unwrap();
@@ -177,7 +182,7 @@ impl BlockAccess {
             extent,
             begin.elapsed().as_micros()
         );
-        vec
+        bytes
     }
 
     // Acquire a permit to write later.  This should be used only for data
@@ -202,7 +207,7 @@ impl BlockAccess {
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    pub async fn write_raw(&self, location: DiskLocation, data: Vec<u8>) {
+    pub async fn write_raw(&self, location: DiskLocation, bytes: AlignedBytes) {
         assert!(
             !self.readonly,
             "attempting zettacache write in readonly mode"
@@ -219,7 +224,9 @@ impl BlockAccess {
                 .await
                 .unwrap(),
         );
-        self.write_raw_permit(permit, location, data).await.unwrap();
+        self.write_raw_permit(permit, location, bytes)
+            .await
+            .unwrap();
     }
 
     // offset and data.len() must be sector-aligned
@@ -232,32 +239,28 @@ impl BlockAccess {
         &self,
         permit: WritePermit,
         location: DiskLocation,
-        data: Vec<u8>,
+        mut bytes: AlignedBytes,
     ) -> JoinHandle<()> {
         assert!(
             !self.readonly,
             "attempting zettacache write in readonly mode"
         );
+        // directio requires the pointer to be sector-aligned
         let fd = self.disk.as_raw_fd();
-        let sector_size = self.sector_size;
-        let length = data.len();
+        let length = bytes.len();
         let offset = location.offset;
+        let alignment = bytes.alignment();
         assert_eq!(offset, self.round_up_to_sector(offset));
         assert_eq!(length, self.round_up_to_sector(length));
+
+        if alignment != self.round_up_to_sector(alignment) {
+            // XXX copying, this happens for AlignedBytes created from a plain Bytes
+            bytes = AlignedBytes::copy_from_slice(&bytes, self.sector_size)
+        }
+        assert_eq!(bytes.as_ptr() as usize % self.sector_size, 0);
         let begin = Instant::now();
         tokio::task::spawn_blocking(move || {
-            let mut v: Vec<u8> = Vec::new();
-            // XXX directio requires the pointer to be sector-aligned, requiring this grossness
-            v.resize(length + sector_size, 0);
-            let aligned = unsafe {
-                let ptr = v.as_mut_ptr() as usize;
-                let aligned_ptr = (ptr + sector_size - 1) / sector_size * sector_size;
-                assert_le!(aligned_ptr - v.as_mut_ptr() as usize, sector_size);
-                std::slice::from_raw_parts_mut(aligned_ptr as *mut u8, length)
-            };
-            // XXX copying
-            aligned.copy_from_slice(&data);
-            nix::sys::uio::pwrite(fd, aligned, i64::try_from(offset).unwrap()).unwrap();
+            nix::sys::uio::pwrite(fd, &bytes, i64::try_from(offset).unwrap()).unwrap();
             drop(permit);
             trace!(
                 "write({:?} len={}) returned in {}us",
@@ -274,7 +277,7 @@ impl BlockAccess {
     }
 
     // XXX ideally this would return a sector-aligned address, so it can be used directly for a directio write
-    pub fn chunk_to_raw<T: Serialize>(&self, encoding: EncodeType, struct_obj: &T) -> Vec<u8> {
+    pub fn chunk_to_raw<T: Serialize>(&self, encoding: EncodeType, struct_obj: &T) -> AlignedBytes {
         let (payload, compression) = match encoding {
             EncodeType::Json => {
                 let json = serde_json::to_vec(struct_obj).unwrap();
@@ -309,15 +312,17 @@ impl BlockAccess {
         };
         let header_bytes = serde_json::to_vec(&header).unwrap();
 
-        let mut buf = Vec::new();
+        let unrounded_len = header_bytes.len() + 1 + payload.len();
+        let len = self.round_up_to_sector(unrounded_len);
+        let mut buf = AlignedVec::with_capacity(len, self.round_up_to_sector(1));
         buf.extend_from_slice(&header_bytes);
         // Encode a NUL byte after the header, so that we know where it ends.
         buf.extend_from_slice(&[0]);
         // XXX copying data around; use bincode::serialize_into() to append it into a larger-than-necessary vec?
         buf.extend_from_slice(&payload);
-        buf.resize(self.round_up_to_sector(buf.len()), 0);
+        buf.extend_from_slice(&vec![0; len - unrounded_len]);
 
-        buf
+        buf.into()
     }
 
     fn bincode_options() -> impl bincode::Options {

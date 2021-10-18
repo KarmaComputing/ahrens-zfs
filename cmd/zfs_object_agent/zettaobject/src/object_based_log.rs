@@ -124,7 +124,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
         object_access
             .put_object(
                 Self::key(name, self.generation, self.chunk),
-                buf,
+                buf.into(),
                 ObjectAccessStatType::MetadataPut,
             )
             .await;

@@ -8,6 +8,7 @@ edition = "2018"
 [dependencies]
 async-trait = "0.1.51"
 backtrace = "0.3"
+bytes = "1.0"
 config = "0.11"
 lazy_static = "1.4.0"
 log = "0.4"

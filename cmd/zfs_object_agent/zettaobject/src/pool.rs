@@ -1,5 +1,5 @@
 use crate::base_types::*;
-use crate::data_object::DataObjectPhys;
+use crate::data_object::DataObject;
 use crate::features;
 use crate::features::FeatureError;
 use crate::features::FeatureFlag;
@@ -16,6 +16,7 @@ use crate::pool_destroy;
 use crate::pool_destroy::PoolDestroyingPhys;
 use anyhow::Error;
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use conv::ConvUtil;
 use futures::future;
 use futures::future::join;
@@ -31,7 +32,6 @@ use log::*;
 use more_asserts::*;
 use nvpair::NvList;
 use serde::{Deserialize, Serialize};
-use serde_bytes::ByteBuf;
 use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::hash_map;
@@ -52,6 +52,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::AlignedBytes;
 use util::TerseVec;
 use uuid::Uuid;
 use zettacache::base_types::*;
@@ -142,7 +143,7 @@ impl PoolOwnerPhys {
         object_access
             .put_object_timed(
                 Self::key(self.id),
-                buf,
+                buf.into(),
                 ObjectAccessStatType::MetadataPut,
                 timeout,
             )
@@ -250,12 +251,12 @@ impl Borrow<ObjectId> for ObjectSize {
     }
 }
 
-impl From<&DataObjectPhys> for ObjectSize {
-    fn from(phys: &DataObjectPhys) -> Self {
+impl From<&DataObject> for ObjectSize {
+    fn from(phys: &DataObject) -> Self {
         ObjectSize {
-            object: phys.object,
+            object: phys.header.object,
             num_blocks: phys.blocks_len(),
-            num_bytes: phys.blocks_size,
+            num_bytes: phys.header.blocks_size,
         }
     }
 }
@@ -297,7 +298,11 @@ impl PoolPhys {
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
-            .put_object(Self::key(self.guid), buf, ObjectAccessStatType::MetadataPut)
+            .put_object(
+                Self::key(self.guid),
+                buf.into(),
+                ObjectAccessStatType::MetadataPut,
+            )
             .await;
     }
 }
@@ -339,7 +344,7 @@ impl UberblockPhys {
         object_access
             .put_object(
                 Self::key(self.guid, self.txg),
-                buf,
+                buf.into(),
                 ObjectAccessStatType::MetadataPut,
             )
             .await;
@@ -505,7 +510,7 @@ struct PoolSyncingState {
     reclaim_info: ReclaimInfo, // Extendible hash structure for pending frees
 
     pending_object: PendingObjectState,
-    pending_unordered_writes: HashMap<BlockId, (ByteBuf, oneshot::Sender<()>)>,
+    pending_unordered_writes: HashMap<BlockId, (Bytes, oneshot::Sender<()>)>,
     pub last_txg: Txg,
     pub syncing_txg: Option<Txg>,
     stats: PoolStatsPhys,
@@ -525,19 +530,19 @@ type SyncTask =
 
 #[derive(Debug)]
 enum PendingObjectState {
-    Pending(DataObjectPhys, Vec<oneshot::Sender<()>>), // available to write
+    Pending(DataObject, Vec<oneshot::Sender<()>>), // available to write
     NotPending(BlockId), // not available to write; this is the next blockID to use
 }
 
 impl PendingObjectState {
-    fn as_mut_pending(&mut self) -> (&mut DataObjectPhys, &mut Vec<oneshot::Sender<()>>) {
+    fn as_mut_pending(&mut self) -> (&mut DataObject, &mut Vec<oneshot::Sender<()>>) {
         match self {
             PendingObjectState::Pending(phys, done) => (phys, done),
             _ => panic!("invalid {:?}", self),
         }
     }
 
-    fn unwrap_pending(self) -> (DataObjectPhys, Vec<oneshot::Sender<()>>) {
+    fn unwrap_pending(self) -> (DataObject, Vec<oneshot::Sender<()>>) {
         match self {
             PendingObjectState::Pending(phys, done) => (phys, done),
             _ => panic!("invalid {:?}", self),
@@ -553,16 +558,13 @@ impl PendingObjectState {
 
     fn next_block(&self) -> BlockId {
         match self {
-            PendingObjectState::Pending(phys, _) => phys.next_block,
+            PendingObjectState::Pending(phys, _) => phys.header.next_block,
             PendingObjectState::NotPending(next_block) => *next_block,
         }
     }
 
     fn new_pending(guid: PoolGuid, object: ObjectId, next_block: BlockId, txg: Txg) -> Self {
-        PendingObjectState::Pending(
-            DataObjectPhys::new(guid, object, next_block, txg),
-            Vec::new(),
-        )
+        PendingObjectState::Pending(DataObject::new(guid, object, next_block, txg), Vec::new())
     }
 }
 
@@ -767,7 +769,7 @@ impl PoolState {
 
         oa.delete_objects(
             select_all(
-                DataObjectPhys::prefixes(shared_state.guid)
+                DataObject::prefixes(shared_state.guid)
                     .into_iter()
                     .map(|prefix| {
                         let start_after = Some(format!("{}{}", prefix, last_obj));
@@ -1054,11 +1056,11 @@ impl Pool {
         state: &Arc<PoolState>,
         shared_state: &Arc<PoolSharedState>,
         txg: Txg,
-    ) -> BTreeMap<ObjectId, DataObjectPhys> {
+    ) -> BTreeMap<ObjectId, DataObject> {
         let begin = Instant::now();
         let last_obj = state.object_block_map.last_object();
         let list_stream = FuturesUnordered::new();
-        for prefix in DataObjectPhys::prefixes(shared_state.guid) {
+        for prefix in DataObject::prefixes(shared_state.guid) {
             let shared_state = shared_state.clone();
             list_stream.push(async move {
                 let start_after = Some(format!("{}{}", prefix, last_obj));
@@ -1075,7 +1077,7 @@ impl Pool {
                 for key in vec {
                     let shared_state = shared_state.clone();
                     sub_stream.push(future::ready(async move {
-                        DataObjectPhys::get_from_key(
+                        DataObject::get_from_key(
                             &shared_state.object_access,
                             key,
                             ObjectAccessStatType::ReadsGet,
@@ -1091,12 +1093,12 @@ impl Pool {
                 let data = data_res.unwrap();
                 debug!(
                     "resume: found {:?}, min={:?} next={:?}",
-                    data.object, data.min_block, data.next_block
+                    data.header.object, data.header.min_block, data.header.next_block
                 );
-                assert_eq!(data.guid, shared_state.guid);
-                assert_eq!(data.min_txg, txg);
-                assert_eq!(data.max_txg, txg);
-                map.insert(data.object, data);
+                assert_eq!(data.header.guid, shared_state.guid);
+                assert_eq!(data.header.min_txg, txg);
+                assert_eq!(data.header.max_txg, txg);
+                map.insert(data.header.object, data);
                 map
             })
             .await;
@@ -1132,7 +1134,7 @@ impl Pool {
             while let Some((_, next_recovered_object)) = recovered_objects_iter.peek() {
                 match ordered_writes_iter.peek() {
                     Some(next_ordered_write)
-                        if next_ordered_write < &next_recovered_object.min_block =>
+                        if next_ordered_write < &next_recovered_object.header.min_block =>
                     {
                         // writes are next, and there are objects after this
 
@@ -1150,7 +1152,7 @@ impl Pool {
                             state,
                             syncing_state,
                             None,
-                            Some(next_recovered_object.min_block),
+                            Some(next_recovered_object.header.min_block),
                         );
 
                         let (phys, _) = syncing_state.pending_object.as_mut_pending();
@@ -1177,12 +1179,12 @@ impl Pool {
                         // case we will not create an object, since the blocks are
                         // already persistent, so we need to notify the waiter now.
                         while let Some(obsolete_write) =
-                            ordered_writes_iter.next_if(|&b| b < recovered_obj.next_block)
+                            ordered_writes_iter.next_if(|&b| b < recovered_obj.header.next_block)
                         {
                             trace!(
                                 "resume: {:?} is obsoleted by existing {:?}",
                                 obsolete_write,
-                                recovered_obj.object,
+                                recovered_obj.header.object,
                             );
                             let (_, sender) = syncing_state
                                 .pending_unordered_writes
@@ -1192,7 +1194,7 @@ impl Pool {
                         }
                         assert!(!syncing_state.pending_object.is_pending());
                         syncing_state.pending_object =
-                            PendingObjectState::NotPending(recovered_obj.next_block);
+                            PendingObjectState::NotPending(recovered_obj.header.next_block);
                     }
                 }
             }
@@ -1289,7 +1291,7 @@ impl Pool {
             assert!(phys.is_empty());
             assert!(senders.is_empty());
 
-            syncing_state.pending_object = PendingObjectState::NotPending(phys.next_block);
+            syncing_state.pending_object = PendingObjectState::NotPending(phys.header.next_block);
         }
 
         try_split_reclaim_logs(state.clone(), &mut syncing_state).await;
@@ -1398,7 +1400,12 @@ impl Pool {
 
     fn check_pending_flushes(state: &PoolState, syncing_state: &mut PoolSyncingState) {
         let mut do_flush = false;
-        let next_block = syncing_state.pending_object.as_mut_pending().0.next_block;
+        let next_block = syncing_state
+            .pending_object
+            .as_mut_pending()
+            .0
+            .header
+            .next_block;
         while let Some(flush_block_ref) = syncing_state.pending_flushes.iter().next() {
             let flush_block = *flush_block_ref;
             if flush_block < next_block {
@@ -1433,24 +1440,24 @@ impl Pool {
     fn account_new_object(
         state: &PoolState,
         syncing_state: &mut PoolSyncingState,
-        phys: &DataObjectPhys,
+        phys: &DataObject,
     ) {
         let txg = syncing_state.syncing_txg.unwrap();
-        let object = phys.object;
-        assert_eq!(phys.guid, state.shared_state.guid);
-        assert_eq!(phys.min_txg, txg);
-        assert_eq!(phys.max_txg, txg);
+        let object = phys.header.object;
+        assert_eq!(phys.header.guid, state.shared_state.guid);
+        assert_eq!(phys.header.min_txg, txg);
+        assert_eq!(phys.header.max_txg, txg);
         assert_gt!(object, state.object_block_map.last_object());
         syncing_state.stats.objects_count += 1;
-        syncing_state.stats.blocks_bytes += u64::from(phys.blocks_size);
+        syncing_state.stats.blocks_bytes += u64::from(phys.header.blocks_size);
         syncing_state.stats.blocks_count += u64::from(phys.blocks_len());
         state
             .object_block_map
-            .insert(object, phys.min_block, phys.next_block);
+            .insert(object, phys.header.min_block, phys.header.next_block);
         syncing_state.storage_object_log.append(
             txg,
             StorageObjectLogEntry::Alloc {
-                min_block: phys.min_block,
+                min_block: phys.header.min_block,
                 object,
             },
         );
@@ -1470,7 +1477,7 @@ impl Pool {
             if phys.is_empty() {
                 return;
             } else {
-                (phys.object, phys.next_block)
+                (phys.header.object, phys.header.next_block)
             }
         };
 
@@ -1485,7 +1492,7 @@ impl Pool {
         )
         .unwrap_pending();
 
-        assert_eq!(object, phys.object);
+        assert_eq!(object, phys.header.object);
 
         Self::account_new_object(state, syncing_state, &phys);
 
@@ -1523,13 +1530,13 @@ impl Pool {
                 next_block
             );
             let (phys, senders) = syncing_state.pending_object.as_mut_pending();
-            phys.blocks_size += u32::try_from(buf.len()).unwrap();
-            phys.blocks.insert(phys.next_block, buf);
+            phys.header.blocks_size += u32::try_from(buf.len()).unwrap();
+            phys.blocks.insert(phys.header.next_block, buf);
             next_block = next_block.next();
-            phys.next_block = next_block;
+            phys.header.next_block = next_block;
             senders.push(sender);
             if let Some(size_limit) = size_limit_opt {
-                if phys.blocks_size >= size_limit {
+                if phys.header.blocks_size >= size_limit {
                     Self::initiate_flush_object_impl(state, syncing_state);
                 }
             }
@@ -1542,8 +1549,7 @@ impl Pool {
         Self::check_pending_flushes(state, syncing_state);
     }
 
-    pub async fn write_block(&self, block: BlockId, data: Vec<u8>) {
-        let data2 = data.clone(); // XXX copying
+    pub async fn write_block(&self, block: BlockId, bytes: AlignedBytes) {
         let receiver = self.state.with_syncing_state(|syncing_state| {
             // XXX change to return error
             assert!(syncing_state.syncing_txg.is_some());
@@ -1553,7 +1559,7 @@ impl Pool {
             trace!("inserting {:?} to unordered pending writes", block);
             syncing_state
                 .pending_unordered_writes
-                .insert(block, (ByteBuf::from(data), sender));
+                .insert(block, (bytes.clone(), sender));
 
             Self::write_unordered_to_pending_object(
                 &self.state,
@@ -1588,13 +1594,13 @@ impl Pool {
                         block
                     );
                 }
-                LookupResponse::Absent(key) => cache.insert(key, data2, InsertSource::Write).await,
+                LookupResponse::Absent(key) => cache.insert(key, bytes, InsertSource::Write).await,
             }
         }
         receiver.await.unwrap();
     }
 
-    async fn read_object_for_block(&self, block: BlockId, bypass_cache: bool) -> DataObjectPhys {
+    async fn read_object_for_block(&self, block: BlockId, bypass_cache: bool) -> DataObject {
         // If we are in the middle of resuming, wait for that to complete before
         // processing this read.  This is needed because we may be reading from
         // a block that hasn't yet been added to the ObjectBlockMap.
@@ -1609,7 +1615,7 @@ impl Pool {
         let shared_state = self.state.shared_state.clone();
 
         trace!("reading {:?} for {:?}", object, block);
-        let phys = DataObjectPhys::get(
+        DataObject::get(
             &shared_state.object_access,
             shared_state.guid,
             object,
@@ -1617,52 +1623,48 @@ impl Pool {
             bypass_cache,
         )
         .await
-        .unwrap();
-        // XXX consider using debug_assert_eq
-        assert_eq!(phys.blocks_size, phys.calculate_blocks_size());
-
-        phys
+        .unwrap()
     }
 
-    async fn read_block_impl(&self, block: BlockId, bypass_cache: bool) -> Vec<u8> {
-        let phys = self.read_object_for_block(block, bypass_cache).await;
-        // XXX to_owned() copies the data; would be nice to return a reference
-        phys.get_block(block).to_owned()
-    }
-
-    pub async fn read_block(&self, block: BlockId, heal: bool) -> Vec<u8> {
+    pub async fn read_block(&self, block: BlockId, heal: bool) -> Bytes {
+        // Note: bytes.clone().into() will result in a memcpy in
+        // BlockAccess::write_raw_permit(), if we end up actually writing it to
+        // disk.
         match &self.state.zettacache {
             Some(cache) => match heal {
                 true => {
-                    let object_vec = self.read_block_impl(block, heal).await;
+                    let bytes = self
+                        .read_object_for_block(block, heal)
+                        .await
+                        .get_block(block);
                     cache
-                        .heal(self.state.shared_state.guid, block, &object_vec)
+                        .heal(self.state.shared_state.guid, block, bytes.clone().into())
                         .await;
-                    object_vec
+                    bytes
                 }
                 false => match cache.lookup(self.state.shared_state.guid, block).await {
-                    LookupResponse::Present((cached_vec, _key, _value)) => cached_vec,
+                    LookupResponse::Present((cached_bytes, _key, _value)) => cached_bytes.into(),
                     LookupResponse::Absent(key) => {
-                        let mut phys = self.read_object_for_block(block, heal).await;
-
-                        let vec = phys.blocks.remove(&block).unwrap().into_vec();
-
+                        let mut data_object = self.read_object_for_block(block, heal).await;
+                        let bytes = data_object.blocks.remove(&block).unwrap();
                         join(
                             async {
-                                // XXX Unfortunately, we must copy `vec` so that we can give it to `cache.insert`, while also returning it.
-                                cache.insert(key, vec.clone(), InsertSource::Read).await;
+                                cache
+                                    .insert(key, bytes.clone().into(), InsertSource::Read)
+                                    .await;
                             },
                             async {
-                                phys.blocks
+                                data_object
+                                    .blocks
                                     .into_iter()
-                                    .map(|(b, buf)| async move {
+                                    .map(|(b, bytes)| async move {
                                         if let LookupResponse::Absent(key) =
                                             cache.lookup(self.state.shared_state.guid, b).await
                                         {
                                             cache
                                                 .insert(
                                                     key,
-                                                    buf.into_vec(),
+                                                    bytes.clone().into(),
                                                     InsertSource::SpeculativeRead,
                                                 )
                                                 .await;
@@ -1675,11 +1677,14 @@ impl Pool {
                         )
                         .await;
 
-                        vec
+                        bytes
                     }
                 },
             },
-            None => self.read_block_impl(block, heal).await,
+            None => self
+                .read_object_for_block(block, heal)
+                .await
+                .get_block(block),
         }
     }
 
@@ -1860,7 +1865,7 @@ async fn delete_data_objects(shared_state: Arc<PoolSharedState>, objects: Vec<Ob
             .delete_objects(stream::iter(
                 objects
                     .into_iter()
-                    .map(|o| DataObjectPhys::key(shared_state.guid, o)),
+                    .map(|o| DataObject::key(shared_state.guid, o)),
             ))
             .await;
         info!(
@@ -2092,7 +2097,7 @@ async fn reclaim_frees_object(
             // overwrite it with put(), we don't need to copy the data into the
             // cache to invalidate.
             let mut phys =
-                DataObjectPhys::get(&my_shared_state.object_access, my_shared_state.guid, object, ObjectAccessStatType::ReclaimGet, true)
+                DataObject::get(&my_shared_state.object_access, my_shared_state.guid, object, ObjectAccessStatType::ReclaimGet, true)
                     .await
                     .unwrap();
 
@@ -2106,7 +2111,7 @@ async fn reclaim_frees_object(
                 // stats purposes.
                 if let Some(v) = phys.blocks.remove(&ent.block) {
                     assert_eq!(u32::try_from(v.len()).unwrap(), ent.size);
-                    phys.blocks_size -= ent.size;
+                    phys.header.blocks_size -= ent.size;
                 }
             }
 
@@ -2123,23 +2128,23 @@ async fn reclaim_frees_object(
             // doesn't have any required blocks.  That happens above, where we
             // `continue`.
 
-            if phys.min_block != min_block || phys.next_block != next_block {
+            if phys.header.min_block != min_block || phys.header.next_block != next_block {
                 debug!("reclaim: {:?} expected range BlockID[{},{}), found BlockID[{},{}), trimming uncommitted consolidation",
-                    object, min_block, next_block, phys.min_block, phys.next_block);
+                    object, min_block, next_block, phys.header.min_block, phys.header.next_block);
                 phys
                     .blocks
                     .retain(|block, _| block >= &min_block && block < &next_block);
 
-                assert_ge!(phys.blocks_size, object_size.num_bytes);
-                phys.blocks_size = object_size.num_bytes;
+                assert_ge!(phys.header.blocks_size, object_size.num_bytes);
+                phys.header.blocks_size = object_size.num_bytes;
 
-                assert_le!(phys.min_block, min_block);
-                phys.min_block = min_block;
-                assert_ge!(phys.next_block, next_block);
-                phys.next_block = next_block;
+                assert_le!(phys.header.min_block, min_block);
+                phys.header.min_block = min_block;
+                assert_ge!(phys.header.next_block, next_block);
+                phys.header.next_block = next_block;
             }
-            assert_eq!(phys.blocks_size, phys.calculate_blocks_size());
-            assert_eq!(phys.blocks_size, object_size.num_bytes);
+            assert_eq!(phys.header.blocks_size, phys.calculate_blocks_size());
+            assert_eq!(phys.header.blocks_size, object_size.num_bytes);
             assert_eq!(phys.blocks_len(), object_size.num_blocks);
 
             phys
@@ -2148,45 +2153,45 @@ async fn reclaim_frees_object(
     let mut new_phys = stream
         .buffered(*RECLAIM_ONE_BUFFERED)
         .reduce(|mut a, mut b| async move {
-            assert_eq!(a.guid, b.guid);
+            assert_eq!(a.header.guid, b.header.guid);
             trace!(
                 "reclaim: moving {} blocks from {:?} (TXG[{},{}] BlockID[{},{})) to {:?} (TXG[{},{}] BlockID[{},{}))",
                 b.blocks_len(),
-                b.object,
-                b.min_txg.0,
-                b.max_txg.0,
-                b.min_block,
-                b.next_block,
-                a.object,
-                a.min_txg.0,
-                a.max_txg.0,
-                a.min_block,
-                a.next_block,
+                b.header.object,
+                b.header.min_txg.0,
+                b.header.max_txg.0,
+                b.header.min_block,
+                b.header.next_block,
+                a.header.object,
+                a.header.min_txg.0,
+                a.header.max_txg.0,
+                a.header.min_block,
+                a.header.next_block,
             );
-            a.object = min(a.object, b.object);
-            a.min_txg = min(a.min_txg, b.min_txg);
-            a.max_txg = max(a.max_txg, b.max_txg);
-            a.min_block = min(a.min_block, b.min_block);
-            a.next_block = max(a.next_block, b.next_block);
+            a.header.object = min(a.header.object, b.header.object);
+            a.header.min_txg = min(a.header.min_txg, b.header.min_txg);
+            a.header.max_txg = max(a.header.max_txg, b.header.max_txg);
+            a.header.min_block = min(a.header.min_block, b.header.min_block);
+            a.header.next_block = max(a.header.next_block, b.header.next_block);
             let mut already_moved = 0;
             for (k, v) in b.blocks.drain() {
                 let len = u32::try_from(v.len()).unwrap();
                 match a.blocks.insert(k, v) {
-                    Some(old_vec) => {
+                    Some(old_bytes) => {
                         // May have already been transferred in a previous job
                         // during which we crashed before updating the metadata.
-                        assert_eq!(&old_vec, a.get_block(k));
+                        assert_eq!(old_bytes, a.get_block(k));
                         already_moved += 1;
                     }
                     None => {
-                        a.blocks_size += len;
+                        a.header.blocks_size += len;
                     }
                 }
             }
             if already_moved > 0 {
                 debug!(
                     "reclaim: while moving blocks from {:?} to {:?} found {} blocks already moved",
-                    b.object, a.object, already_moved
+                    b.header.object, a.header.object, already_moved
                 );
             }
             a
@@ -2196,13 +2201,13 @@ async fn reclaim_frees_object(
 
     if let Some(first) = first {
         // Fold in the min/next_block info which includes the skipped objects.
-        assert_eq!(new_phys.object, first.object);
-        assert_ge!(new_phys.min_block, first.min_block);
-        assert_le!(new_phys.next_block, first.next_block);
-        new_phys.min_block = first.min_block;
-        new_phys.next_block = first.next_block;
+        assert_eq!(new_phys.header.object, first.object);
+        assert_ge!(new_phys.header.min_block, first.min_block);
+        assert_le!(new_phys.header.next_block, first.next_block);
+        new_phys.header.min_block = first.min_block;
+        new_phys.header.next_block = first.next_block;
     }
-    assert_eq!(new_phys.object, first_object);
+    assert_eq!(new_phys.header.object, first_object);
     // XXX would be nice to skip this if we didn't actually make any change
     // (because we already did it all before crashing)
     trace!("reclaim: rewriting {}", new_phys);

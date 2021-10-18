@@ -36,6 +36,7 @@ use tokio::sync::Semaphore;
 use tokio::time::{sleep_until, timeout_at};
 use util::get_tunable;
 use util::maybe_die_with;
+use util::AlignedBytes;
 use util::From64;
 use util::LockSet;
 use util::LockedItem;
@@ -525,7 +526,7 @@ struct ZettaCacheState {
 pub struct LockedKey(LockedItem<IndexKey>);
 
 pub enum LookupResponse {
-    Present((Vec<u8>, LockedKey, IndexValue)),
+    Present((AlignedBytes, LockedKey, IndexValue)),
     Absent(LockedKey),
 }
 
@@ -1016,9 +1017,9 @@ impl ZettaCache {
         if let Some(read_data_fut) = read_data_fut_opt {
             // pending state tells us what to do
             match read_data_fut.await {
-                Some((vec, value)) => {
+                Some((bytes, value)) => {
                     self.cache_hit_without_index_read(&key);
-                    return LookupResponse::Present((vec, locked_key, value));
+                    return LookupResponse::Present((bytes, locked_key, value));
                 }
                 None => {
                     self.cache_miss_without_index_read(&key);
@@ -1074,10 +1075,10 @@ impl ZettaCache {
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    pub async fn insert(&self, locked_key: LockedKey, buf: Vec<u8>, source: InsertSource) {
+    pub async fn insert(&self, locked_key: LockedKey, bytes: AlignedBytes, source: InsertSource) {
         // The passed in buffer is only for a single block, which is capped to SPA_MAXBLOCKSIZE,
         // and thus we should never have an issue converting the length to a "u32" here.
-        let bytes = u32::try_from(buf.len()).unwrap();
+        let len = u32::try_from(bytes.len()).unwrap();
 
         // This permit will be dropped when the write to disk completes.  It
         // serves to limit the number of insert()'s that we can buffer before
@@ -1086,7 +1087,7 @@ impl ZettaCache {
             InsertSource::Heal | InsertSource::SpeculativeRead | InsertSource::Write => match self
                 .nonblocking_buffer_bytes_available
                 .clone()
-                .try_acquire_many_owned(bytes)
+                .try_acquire_many_owned(len)
             {
                 Ok(permit) => permit,
                 Err(tokio::sync::TryAcquireError::NoPermits) => {
@@ -1098,7 +1099,7 @@ impl ZettaCache {
             InsertSource::Read => match self
                 .blocking_buffer_bytes_available
                 .clone()
-                .acquire_many_owned(bytes)
+                .acquire_many_owned(len)
                 .await
             {
                 Ok(permit) => permit,
@@ -1125,7 +1126,7 @@ impl ZettaCache {
                 state
                     .lock_non_send()
                     .await
-                    .insert(insert_permit, write_permit, locked_key, buf);
+                    .insert(insert_permit, write_permit, locked_key, bytes);
             fut.await;
         });
     }
@@ -1149,34 +1150,35 @@ impl ZettaCache {
         );
     }
 
-    pub async fn heal(&self, guid: PoolGuid, block: BlockId, buf: &[u8]) {
-        if let LookupResponse::Present((cached_buf, locked_key, value)) =
+    pub async fn heal(&self, guid: PoolGuid, block: BlockId, bytes: AlignedBytes) {
+        if let LookupResponse::Present((cached_bytes, locked_key, value)) =
             self.lookup(guid, block).await
         {
-            if cached_buf != buf {
-                if buf.len() == value.size as usize {
+            if *cached_bytes != *bytes {
+                if bytes.len() == value.size as usize {
                     // overwrite with correct data
                     self.healed_by_overwriting(locked_key.0.value(), &value);
-                    self.block_access
-                        .write_raw(value.location, buf.to_owned())
-                        .await;
+                    self.block_access.write_raw(value.location, bytes).await;
                 } else {
                     // size differs; evict from cache and reinsert
-                    self.healed_by_evicting(locked_key.0.value(), &value, buf.len());
+                    self.healed_by_evicting(locked_key.0.value(), &value, bytes.len());
                     {
                         let mut state = self.state.lock_non_send().await;
                         state.remove_from_index(*locked_key.0.value(), value);
                         state.block_allocator.free(value.extent());
                     }
-                    self.insert(locked_key, buf.to_owned(), InsertSource::Heal)
-                        .await;
+                    self.insert(locked_key, bytes, InsertSource::Heal).await;
                 }
             }
         }
     }
+
+    pub fn sector_size(&self) -> usize {
+        self.block_access.round_up_to_sector(1)
+    }
 }
 
-type DataReader = Pin<Box<dyn Future<Output = Option<(Vec<u8>, IndexValue)>> + Send>>;
+type DataReader = Pin<Box<dyn Future<Output = Option<(AlignedBytes, IndexValue)>> + Send>>;
 
 fn data_reader_none() -> DataReader {
     Box::pin(async move { None })
@@ -1283,10 +1285,10 @@ impl ZettaCacheState {
                 let _permit = write_sem.acquire().await.unwrap();
             }
 
-            let vec = block_access.read_raw(value.extent()).await;
+            let bytes = block_access.read_raw(value.extent()).await;
             sem.add_permits(1);
             // XXX we can easily handle an io error here by returning None
-            Some((vec, value))
+            Some((bytes, value))
         })
     }
 
@@ -1349,23 +1351,10 @@ impl ZettaCacheState {
         insert_permit: OwnedSemaphorePermit,
         write_permit: WritePermit,
         locked_key: LockedKey,
-        buf: Vec<u8>,
+        bytes: AlignedBytes,
     ) -> impl Future {
-        let buf_size = buf.len();
-        let aligned_size = self.block_access.round_up_to_sector(buf_size);
-
-        let aligned_buf = if buf_size == aligned_size {
-            buf
-        } else {
-            // pad to sector size
-            let mut tail: Vec<u8> = Vec::new();
-            tail.resize(aligned_size - buf_size, 0);
-            // XXX copying data around; have caller pass in larger buffer?  or
-            // at least let us pass the unaligned buf to write_raw() which
-            // already has to copy it around to get the pointer aligned.
-            [buf, tail].concat()
-        };
-        let location_opt = self.allocate_block(u32::try_from(aligned_buf.len()).unwrap());
+        let buf_size = bytes.len();
+        let location_opt = self.allocate_block(u32::try_from(bytes.len()).unwrap());
         if location_opt.is_none() {
             return future::Either::Left(async {});
         }
@@ -1424,7 +1413,7 @@ impl ZettaCacheState {
         // until the io completes.
         future::Either::Right(async move {
             block_access
-                .write_raw_permit(write_permit, location, aligned_buf)
+                .write_raw_permit(write_permit, location, bytes)
                 .await
                 .unwrap();
             sem.add_permits(1);

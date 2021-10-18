@@ -31,7 +31,7 @@ impl Perf {
     #[measure(HitCount)]
     async fn put(&self, object_access: &ObjectAccess, key: String, data: Vec<u8>) {
         object_access
-            .put_object(key, data, ObjectAccessStatType::MetadataPut)
+            .put_object(key, data.into(), ObjectAccessStatType::MetadataPut)
             .await;
     }
 

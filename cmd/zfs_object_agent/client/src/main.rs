@@ -413,7 +413,11 @@ async fn do_test_connectivity(object_access: &ObjectAccess) {
     let content = "test connectivity to S3".as_bytes().to_vec();
 
     object_access
-        .put_object(file.clone(), content, ObjectAccessStatType::MetadataPut)
+        .put_object(
+            file.clone(),
+            content.into(),
+            ObjectAccessStatType::MetadataPut,
+        )
         .await;
     object_access.delete_object(file).await;
 }

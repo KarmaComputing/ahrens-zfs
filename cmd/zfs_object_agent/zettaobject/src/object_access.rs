@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use async_stream::stream;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use core::time::Duration;
 use enum_map::{Enum, EnumMap};
 use futures::future::Either;
-use futures::stream::{self, StreamExt};
-use futures::{future, Future, TryStreamExt};
+use futures::stream;
+use futures::{future, Future, StreamExt, TryStreamExt};
 use futures_core::Stream;
 use http::StatusCode;
 use lazy_static::lazy_static;
@@ -32,8 +32,8 @@ use util::get_tunable;
 
 struct ObjectCache {
     // XXX cache key should include Bucket
-    cache: LruCache<String, Arc<Vec<u8>>>,
-    reading: HashMap<String, watch::Receiver<Option<Arc<Vec<u8>>>>>,
+    cache: LruCache<String, Bytes>,
+    reading: HashMap<String, watch::Receiver<Option<Bytes>>>,
 }
 
 lazy_static! {
@@ -297,9 +297,9 @@ impl ObjectAccess {
         key: String,
         stat_type: ObjectAccessStatType,
         timeout: Option<Duration>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         let msg = format!("get {}", key);
-        let v = retry(&msg, timeout, || async {
+        let bytes = retry(&msg, timeout, || async {
             let req = GetObjectRequest {
                 bucket: self.bucket_str.clone(),
                 key: key.clone(),
@@ -307,8 +307,9 @@ impl ObjectAccess {
             };
             let output = self.client.get_object(req).await?;
             let begin = Instant::now();
-            let mut v =
-                Vec::with_capacity(usize::try_from(output.content_length.unwrap_or(0)).unwrap());
+            let mut v = BytesMut::with_capacity(
+                usize::try_from(output.content_length.unwrap_or(0)).unwrap(),
+            );
             let mut count = 0;
             match output
                 .body
@@ -340,29 +341,25 @@ impl ObjectAccess {
         .await
         .with_context(|| format!("Failed to {}", msg))?;
 
-        Ok(v)
+        Ok(bytes.into())
     }
 
     pub async fn get_object_uncached(
         &self,
         key: String,
         stat_type: ObjectAccessStatType,
-    ) -> Result<Arc<Vec<u8>>> {
-        let vec = self.get_object_impl(key.clone(), stat_type, None).await?;
+    ) -> Result<Bytes> {
+        let bytes = self.get_object_impl(key.clone(), stat_type, None).await?;
         // Note: we *should* have the same data from S3 (in the `vec`) and in
         // the cache, so this invalidation is normally not necessary.  However,
         // in case a bug (or undetected RAM error) resulted in incorrect cached
         // data, we want to invalidate the cache so that we won't get the bad
         // cached data again.
         Self::invalidate_cache(key);
-        Ok(Arc::new(vec))
+        Ok(bytes)
     }
 
-    pub async fn get_object(
-        &self,
-        key: String,
-        stat_type: ObjectAccessStatType,
-    ) -> Result<Arc<Vec<u8>>> {
+    pub async fn get_object(&self, key: String, stat_type: ObjectAccessStatType) -> Result<Bytes> {
         let either = {
             // need this block separate so that we can drop the mutex before the .await
             let mut c = CACHE.lock().unwrap();
@@ -373,11 +370,10 @@ impl ObjectAccess {
                 }
                 None => match c.reading.get(&key) {
                     None => {
-                        let (tx, rx) = watch::channel::<Option<Arc<Vec<u8>>>>(None);
+                        let (tx, rx) = watch::channel::<Option<Bytes>>(None);
                         c.reading.insert(key.clone(), rx);
                         Either::Left(async move {
-                            let v =
-                                Arc::new(self.get_object_impl(key.clone(), stat_type, None).await?);
+                            let v = self.get_object_impl(key.clone(), stat_type, None).await?;
                             let mut myc = CACHE.lock().unwrap();
                             tx.send(Some(v.clone())).unwrap();
                             myc.cache.put(key.to_string(), v.clone());
@@ -517,12 +513,11 @@ impl ObjectAccess {
     async fn put_object_impl(
         &self,
         key: String,
-        data: Vec<u8>,
+        bytes: Bytes,
         stat_type: ObjectAccessStatType,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
-        let len = data.len();
-        let bytes = Bytes::from(data);
+        let len = bytes.len();
         assert!(!self.readonly);
         self.access_stats[stat_type].record_operation(len as u64);
         retry(&format!("put {} ({} bytes)", key, len), timeout, || async {
@@ -545,7 +540,7 @@ impl ObjectAccess {
         CACHE.lock().unwrap().cache.pop(&key);
     }
 
-    pub async fn put_object(&self, key: String, data: Vec<u8>, stat_type: ObjectAccessStatType) {
+    pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessStatType) {
         // Note that we need to PutObject before invalidating the cache.  If a
         // get_object() is called while put_object() is in progress, it may see
         // the old or new value, which is fine.  After put_object() returns,
@@ -562,7 +557,7 @@ impl ObjectAccess {
     pub async fn put_object_timed(
         &self,
         key: String,
-        data: Vec<u8>,
+        data: Bytes,
         stat_type: ObjectAccessStatType,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {

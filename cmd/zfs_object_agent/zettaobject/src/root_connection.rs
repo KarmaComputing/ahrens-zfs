@@ -16,6 +16,7 @@ use nvpair::{NvData, NvList, NvListRef};
 use std::sync::Arc;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::AlignedBytes;
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -299,10 +300,14 @@ impl RootConnectionState {
             .as_ref()
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
+        let alignment = match self.cache.as_ref() {
+            Some(cache) => cache.sector_size(),
+            None => 1,
+        };
         // XXX copying data
-        let vec = slice.to_vec();
+        let bytes = AlignedBytes::copy_from_slice(slice, alignment);
         Ok(Box::pin(async move {
-            pool.write_block(block, vec).await;
+            pool.write_block(block, bytes).await;
             let mut response = NvList::new_unique_names();
             response.insert("Type", "write done").unwrap();
             response.insert("block", &block.0).unwrap();
@@ -343,7 +348,7 @@ impl RootConnectionState {
             nvl.insert("block", &block.0).unwrap();
             nvl.insert("request_id", &request_id).unwrap();
             nvl.insert("token", &token).unwrap();
-            nvl.insert("data", data.as_slice()).unwrap();
+            nvl.insert("data", data.as_ref()).unwrap();
             trace!(
                 "sending read done response: block={} req={} data=[{} bytes]",
                 block,

@@ -2426,6 +2426,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "backtrace",
+ "bytes",
  "config",
  "lazy_static",
  "log",
@@ -2649,6 +2650,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "bincode",
+ "bytes",
  "chrono",
  "conv",
  "futures",

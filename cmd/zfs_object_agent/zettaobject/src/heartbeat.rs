@@ -57,7 +57,7 @@ impl HeartbeatPhys {
         object_access
             .put_object_timed(
                 Self::key(self.id),
-                buf,
+                buf.into(),
                 ObjectAccessStatType::MetadataPut,
                 timeout,
             )
