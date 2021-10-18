@@ -76,11 +76,13 @@ export FIO_SCRIPTS=$STF_SUITE/tests/perf/fio
 export PERF_SCRIPTS=$STF_SUITE/tests/perf/scripts
 
 # some test pool names
-export TESTPOOL=testpool-$(uuidgen | cut -c -13)
-export TESTPOOL1=testpool1-$(uuidgen | cut -c -13)
-export TESTPOOL2=testpool2-$(uuidgen | cut -c -13)
-export TESTPOOL3=testpool3-$(uuidgen | cut -c -13)
-export PERFPOOL=perfpool-$(uuidgen | cut -c -13)
+random_num=$([ -x "$(which uuidgen 2>/dev/null)" ] \
+	&& uuidgen || cat /proc/sys/kernel/random/uuid)
+export TESTPOOL=testpool-$(echo $random_num | cut -c -13)
+export TESTPOOL1=testpool1-$(echo $random_num | cut -c -13)
+export TESTPOOL2=testpool2-$(echo $random_num | cut -c -13)
+export TESTPOOL3=testpool3-$(echo $random_num | cut -c -13)
+export PERFPOOL=perfpool-$(echo $random_num | cut -c -13)
 
 # some test file system names
 export TESTFS=testfs
