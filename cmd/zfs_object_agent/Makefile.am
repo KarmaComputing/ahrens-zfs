@@ -18,6 +18,8 @@ RUSTFLAGS = \
 	-L $(abs_top_builddir)/lib/libzfs/.libs \
 	-L $(abs_top_builddir)/lib/libnvpair/.libs
 
+GITREV = $(shell cat $(abs_top_builddir)/include/zfs_gitrev.h | awk '{print $$3}')
+
 .PHONY: \
 	zcachedb$(EXEEXT) \
 	zfs_object_agent$(EXEEXT) \
@@ -26,23 +28,23 @@ RUSTFLAGS = \
 	libzoa.la
 
 libzoa.la :
-	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zoa $(RUSTTARGET)
+	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zoa $(RUSTTARGET)
 	cp target/@RUSTDIR@/libzoa.so .
 
 zfs_object_agent$(EXEEXT) :
-	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zfs_object_agent $(RUSTTARGET)
+	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zfs_object_agent $(RUSTTARGET)
 	cp target/@RUSTDIR@/zfs_object_agent .
 
 zfs_object_perf$(EXEEXT) :
-	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zfs_object_perf $(RUSTTARGET)
+	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zfs_object_perf $(RUSTTARGET)
 	cp target/@RUSTDIR@/zfs_object_perf .
 
 zoa_test$(EXEEXT) :
-	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zoa_test $(RUSTTARGET)
+	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zoa_test $(RUSTTARGET)
 	cp target/@RUSTDIR@/zoa_test .
 
 zcachedb$(EXEEXT) :
-	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zcachedb $(RUSTTARGET)
+	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zcachedb $(RUSTTARGET)
 	cp target/@RUSTDIR@/zcachedb .
 
 all: build

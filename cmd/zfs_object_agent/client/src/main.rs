@@ -35,7 +35,12 @@ const BUCKET_NAME: &str = "cloudburst-data-2";
 const POOL_NAME: &str = "testpool";
 const POOL_GUID: u64 = 1234;
 
-static GIT_VERSION: &str = git_version!();
+static GIT_VERSION: &str = git_version!(
+    fallback = match option_env!("CARGO_ZOA_GITREV") {
+        Some(value) => value,
+        None => "unknown",
+    }
+);
 
 async fn do_rusoto_provider<P>(credentials_provider: P, file: &str)
 where

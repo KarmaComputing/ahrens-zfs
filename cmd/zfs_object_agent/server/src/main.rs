@@ -2,7 +2,12 @@ use clap::Arg;
 use git_version::git_version;
 use log::*;
 
-static GIT_VERSION: &str = git_version!();
+static GIT_VERSION: &str = git_version!(
+    fallback = match option_env!("CARGO_ZOA_GITREV") {
+        Some(value) => value,
+        None => "unknown",
+    }
+);
 
 fn main() {
     let matches = clap::App::new("ZFS Object Agent")

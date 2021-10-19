@@ -11,7 +11,12 @@ const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
 const REGION: &str = "us-west-2";
 const BUCKET_NAME: &str = "cloudburst-data-2";
 
-static GIT_VERSION: &str = git_version!();
+static GIT_VERSION: &str = git_version!(
+    fallback = match option_env!("CARGO_ZOA_GITREV") {
+        Some(value) => value,
+        None => "unknown",
+    }
+);
 
 #[tokio::main]
 async fn main() {
