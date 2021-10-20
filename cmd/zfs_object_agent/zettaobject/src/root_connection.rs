@@ -121,63 +121,76 @@ impl RootConnectionState {
         info!("got request: {:?}", nvl);
         Box::pin(async move {
             let guid = PoolGuid(nvl.lookup_uint64("GUID")?);
+            let rollback = bool_value(&nvl, "rollback")?;
 
             let object_access = Self::get_object_access(&nvl)?;
             let cache = self.cache.as_ref().cloned();
             let txg = nvl.lookup_uint64("TXG").ok().map(Txg);
             let syncing_txg = nvl.lookup_uint64("syncing_txg").ok().map(Txg);
-
-            let (pool, phys_opt, next_block) =
-                match Pool::open(object_access, guid, txg, cache, self.id, syncing_txg).await {
-                    Err(PoolOpenError::Mmp(hostname)) => {
-                        let mut response = NvList::new_unique_names();
-                        response.insert("Type", "pool open failed").unwrap();
-                        response.insert("cause", "MMP").unwrap();
-                        response.insert("hostname", hostname.as_str()).unwrap();
-                        debug!("sending response: {:?}", response);
-                        return Ok(Some(response));
-                    }
-                    Err(PoolOpenError::Feature(FeatureError { features, readonly })) => {
-                        let mut response = NvList::new_unique_names();
-                        response.insert("Type", "pool open failed").unwrap();
-                        response.insert("cause", "feature").unwrap();
-                        let mut feature_nvl = NvList::new_unique_names();
-                        for feature in features {
-                            feature_nvl.insert(feature.name, "").unwrap();
-                        }
-                        response.insert("features", feature_nvl.as_ref()).unwrap();
-                        response.insert("can_readonly", &readonly).unwrap();
-                        debug!("sending response: {:?}", response);
-                        return Ok(Some(response));
-                    }
-                    Err(PoolOpenError::Get(e)) => {
-                        /*
-                         * It would be really nice to bring up the exact error type from the
-                         * object_access layer here and case on it properly. Unfortunately,
-                         * attempting to do so is best described as... fraught. Errors come from a
-                         * number of sources, and are implicitly converted frequently. Ultimately,
-                         * the blocker is that most of the error types produced by our dependencies
-                         * do not implement Clone, and so cannot be easily propogated up the chain
-                         * when multiple people may be fetching the same object.
-                         *
-                         * If we ever decide to implement our own error types instead of using the
-                         * underlying ones, we could handle this situation more cleanly. Until
-                         * then, we just pass the root cause error message back to the kernel, and
-                         * hope that it can present a usable error to the user.
-                         */
-                        let mut response = NvList::new_unique_names();
-                        response.insert("Type", "pool open failed").unwrap();
-                        response.insert("cause", "IO").unwrap();
-                        response
-                            .insert("message", e.root_cause().to_string().as_str())
-                            .unwrap();
-                        debug!("sending response: {:?}", response);
-                        return Ok(Some(response));
-                    }
-                    Ok(x) => x,
-                };
-
             let mut response = NvList::new_unique_names();
+
+            let (pool, phys_opt, next_block) = match Pool::open(
+                object_access,
+                guid,
+                txg,
+                cache,
+                self.id,
+                syncing_txg,
+                rollback,
+            )
+            .await
+            {
+                Err(PoolOpenError::Mmp(hostname)) => {
+                    response.insert("Type", "pool open failed").unwrap();
+                    response.insert("cause", "MMP").unwrap();
+                    response.insert("hostname", hostname.as_str()).unwrap();
+                    debug!("sending response: {:?}", response);
+                    return Ok(Some(response));
+                }
+                Err(PoolOpenError::Feature(FeatureError { features, readonly })) => {
+                    response.insert("Type", "pool open failed").unwrap();
+                    response.insert("cause", "feature").unwrap();
+                    let mut feature_nvl = NvList::new_unique_names();
+                    for feature in features {
+                        feature_nvl.insert(feature.name, "").unwrap();
+                    }
+                    response.insert("features", feature_nvl.as_ref()).unwrap();
+                    response.insert("can_readonly", &readonly).unwrap();
+                    debug!("sending response: {:?}", response);
+                    return Ok(Some(response));
+                }
+                Err(PoolOpenError::Get(e)) => {
+                    /*
+                     * It would be really nice to bring up the exact error type from the
+                     * object_access layer here and case on it properly. Unfortunately,
+                     * attempting to do so is best described as... fraught. Errors come from a
+                     * number of sources, and are implicitly converted frequently. Ultimately,
+                     * the blocker is that most of the error types produced by our dependencies
+                     * do not implement Clone, and so cannot be easily propogated up the chain
+                     * when multiple people may be fetching the same object.
+                     *
+                     * If we ever decide to implement our own error types instead of using the
+                     * underlying ones, we could handle this situation more cleanly. Until
+                     * then, we just pass the root cause error message back to the kernel, and
+                     * hope that it can present a usable error to the user.
+                     */
+                    response.insert("Type", "pool open failed").unwrap();
+                    response.insert("cause", "IO").unwrap();
+                    response
+                        .insert("message", e.root_cause().to_string().as_str())
+                        .unwrap();
+                    debug!("sending response: {:?}", response);
+                    return Ok(Some(response));
+                }
+                Err(PoolOpenError::NoCheckpoint) => {
+                    response.insert("Type", "pool open failed").unwrap();
+                    response.insert("cause", "checkpoint").unwrap();
+                    debug!("sending response: {:?}", response);
+                    return Ok(Some(response));
+                }
+                Ok(x) => x,
+            };
+
             response.insert("Type", "pool open done").unwrap();
             response.insert("GUID", &guid.0).unwrap();
             if let Some(phys) = phys_opt {
@@ -237,8 +250,9 @@ impl RootConnectionState {
         pool: Arc<Pool>,
         uberblock: Vec<u8>,
         config: Vec<u8>,
+        checkpoint_txg: Option<Txg>,
     ) -> Result<Option<NvList>> {
-        let (stats, features) = pool.end_txg(uberblock, config).await;
+        let (stats, features) = pool.end_txg(uberblock, config, checkpoint_txg).await;
         let mut feature_nvl = NvList::new_unique_names();
         for (feature, refcount) in features {
             feature_nvl.insert(feature.name, &refcount).unwrap();
@@ -277,7 +291,12 @@ impl RootConnectionState {
         Ok(Box::pin(async move {
             let uberblock = u8_array_value(&nvl, "uberblock")?.to_vec();
             let config = u8_array_value(&nvl, "config")?.to_vec();
-            Self::end_txg_impl(pool, uberblock, config).await
+            let checkpoint_txg = match nvl.lookup_uint64("checkpoint").ok() {
+                Some(0) | None => None,
+                Some(t) => Some(Txg(t)),
+            };
+
+            Self::end_txg_impl(pool, uberblock, config, checkpoint_txg).await
         }))
     }
 

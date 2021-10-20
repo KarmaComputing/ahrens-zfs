@@ -55,7 +55,12 @@ impl Display for FeatureFlag {
 */
 
 lazy_static! {
-    static ref SUPPORTED_FEATURES: HashSet<FeatureFlag> = [/*FEATURE_NAME*/].iter().cloned().collect();
+    static ref SUPPORTED_FEATURES: HashSet<FeatureFlag> =
+        [CHECKPOINT.clone()].iter().cloned().collect();
+    pub static ref CHECKPOINT: FeatureFlag = FeatureFlag {
+        name: "com.delphix:agent_checkpoint".to_string(),
+        required: RequiredLevel::RequiredForWrite
+    };
 }
 
 pub fn get_feature(name: &str) -> Option<FeatureFlag> {

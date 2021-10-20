@@ -600,6 +600,8 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
 	fnvlist_add_string(nv, AGENT_ENDPOINT, vos->vos_endpoint);
 	fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
 	fnvlist_add_string(nv, AGENT_BUCKET, vd->vdev_path);
+	fnvlist_add_boolean_value(nv, AGENT_ROLLBACK,
+	    !!(vd->vdev_spa->spa_import_flags & ZFS_IMPORT_CHECKPOINT));
 	if (mode == O_RDONLY)
 		fnvlist_add_boolean(nv, AGENT_READONLY);
 	if (vd->vdev_spa->spa_load_max_txg != UINT64_MAX) {
@@ -675,6 +677,8 @@ agent_end_txg(vdev_object_store_t *vos, uint64_t txg, void *ub_buf,
 	fnvlist_add_uint64(nv, AGENT_TXG, txg);
 	fnvlist_add_uint8_array(nv, AGENT_UBERBLOCK, ub_buf, ub_len);
 	fnvlist_add_uint8_array(nv, AGENT_CONFIG, config_buf, config_len);
+	fnvlist_add_uint64(nv, AGENT_CHECKPOINT,
+	    vos->vos_vdev->vdev_spa->spa_checkpoint_txg);
 
 	zfs_dbgmsg("agent_end_txg(%llu), %u passes",
 	    (u_longlong_t)txg,
@@ -1242,6 +1246,10 @@ agent_reader(void *arg)
 			} else {
 				vos->vos_result = SET_ERROR(EIO);
 			}
+		} else if (strcmp(cause, "checkpoint") == 0) {
+			zfs_dbgmsg("Failed to find checkpoint when attempting "
+			    "to rewind pool");
+			vos->vos_result = SET_ERROR(ZFS_ERR_NO_CHECKPOINT);
 		} else {
 			ASSERT0(strcmp(cause, "feature"));
 			fnvlist_add_nvlist(spa->spa_load_info,

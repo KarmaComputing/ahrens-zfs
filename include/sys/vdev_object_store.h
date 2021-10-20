@@ -83,6 +83,8 @@
 #define	AGENT_DESTROYED_OBJECTS		"destroyed_objects"
 #define	AGENT_POOLS			"pools"
 #define	AGENT_MESSAGE			"message"
+#define	AGENT_CHECKPOINT		"checkpoint"
+#define	AGENT_ROLLBACK			"rollback"
 
 typedef struct vdev_object_store_stats {
 	uint64_t voss_blocks_count;

@@ -4818,26 +4818,32 @@ spa_load_impl(spa_t *spa, spa_import_type_t type, char **ereport)
 		 * anyway.
 		 */
 		update_config_cache = B_TRUE;
-
 		/*
-		 * Extract the checkpointed uberblock from the current MOS
-		 * and use this as the pool's uberblock from now on. If the
-		 * pool is imported as writeable we also write the checkpoint
-		 * uberblock to the labels, making the rewind permanent.
+		 * Object-based pools will do the rewinding process for us in
+		 * the agent; we can skip reopening.
 		 */
-		error = spa_ld_checkpoint_rewind(spa);
-		if (error != 0)
-			return (error);
+		if (!spa_is_object_based(spa)) {
+			/*
+			 * Extract the checkpointed uberblock from the current
+			 * MOS and use this as the pool's uberblock from now
+			 * on. If the pool is imported as writeable we also
+			 * write the checkpoint uberblock to the labels,
+			 * making the rewind permanent.
+			 */
+			error = spa_ld_checkpoint_rewind(spa);
+			if (error != 0)
+				return (error);
 
-		/*
-		 * Redo the loading process again with the
-		 * checkpointed uberblock.
-		 */
-		spa_ld_prepare_for_reload(spa);
-		spa_load_note(spa, "LOADING checkpointed uberblock");
-		error = spa_ld_mos_with_trusted_config(spa, type, NULL);
-		if (error != 0)
-			return (error);
+			/*
+			 * Redo the loading process again with the
+			 * checkpointed uberblock.
+			 */
+			spa_ld_prepare_for_reload(spa);
+			spa_load_note(spa, "LOADING checkpointed uberblock");
+			error = spa_ld_mos_with_trusted_config(spa, type, NULL);
+			if (error != 0)
+				return (error);
+		}
 	}
 
 	/*

@@ -574,6 +574,7 @@ impl ObjectAccess {
 
     // Note: Stream is of raw keys (with prefix)
     pub async fn delete_objects<S: Stream<Item = String>>(&self, stream: S) {
+        assert!(!self.readonly);
         // Note: we intentionally issue the delete calls serially because it
         // doesn't seem to improve performance if we issue them in parallel
         // (using StreamExt::for_each_concurrent()).

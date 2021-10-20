@@ -5411,15 +5411,19 @@ metaslab_free_concrete(vdev_t *vd, uint64_t offset, uint64_t asize,
 		vdev_dirty(vd, VDD_METASLAB, msp, spa_syncing_txg(spa));
 	}
 
-	if (checkpoint) {
+	/*
+	 * For object-based pools, checkpoints are managed by the agent
+	 * because it is responsible for handling the freeing of blocks. As a
+	 * result, we bypass the kernel checkpointing data structures,and let
+	 * the agent take care of it.
+	 */
+	if (vdev_is_object_based(vd)) {
+		object_store_free_block(vd, offset, asize);
+	} else if (checkpoint) {
 		ASSERT(spa_has_checkpoint(spa));
 		range_tree_add(msp->ms_checkpointing, offset, asize);
 	} else {
-		if (vdev_is_object_based(vd)) {
-			object_store_free_block(vd, offset, asize);
-		} else {
-			range_tree_add(msp->ms_freeing, offset, asize);
-		}
+		range_tree_add(msp->ms_freeing, offset, asize);
 	}
 	mutex_exit(&msp->ms_lock);
 }

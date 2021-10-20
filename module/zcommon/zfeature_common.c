@@ -602,6 +602,12 @@ zpool_feature_init(void)
 	zfeature_register(SPA_FEATURE_DRAID,
 	    "org.openzfs:draid", "draid", "Support for distributed spare RAID",
 	    ZFEATURE_FLAG_MOS, ZFEATURE_TYPE_BOOLEAN, NULL);
+
+	zfeature_register(AGENT_FEATURE_CHECKPOINT,
+	    "com.delphix:agent_checkpoint", "agent_checkpoint",
+	    "Support fo checkpoints in object store based pools",
+	    ZFEATURE_FLAG_AGENT | ZFEATURE_FLAG_READONLY_COMPAT,
+	    ZFEATURE_TYPE_BOOLEAN, NULL);
 }
 
 #if defined(_KERNEL)

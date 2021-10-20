@@ -159,6 +159,7 @@ pub enum PoolOpenError {
     Mmp(String),
     Feature(FeatureError),
     Get(Error),
+    NoCheckpoint,
 }
 
 impl From<anyhow::Error> for PoolOpenError {
@@ -173,6 +174,8 @@ pub struct PoolPhys {
     pub name: String,
     last_txg: Txg,
     pub destroying_state: Option<PoolDestroyingPhys>,
+    #[serde(default)]
+    checkpoint_txg: Option<Txg>,
 }
 impl OnDisk for PoolPhys {}
 
@@ -523,6 +526,7 @@ struct PoolSyncingState {
     delete_objects_handle: Option<JoinHandle<()>>,
     features: HashMap<FeatureFlag, u64>,
     resuming: watch::Sender<bool>,
+    checkpoint_txg: Option<Txg>,
 }
 
 type SyncTask =
@@ -807,6 +811,7 @@ impl Pool {
             name: name.to_string(),
             last_txg: Txg(0),
             destroying_state: None,
+            checkpoint_txg: None,
         };
         // XXX make sure it doesn't already exist
         phys.put(object_access).await;
@@ -859,6 +864,16 @@ impl Pool {
         }
 
         let (tx, rx) = watch::channel(syncing_txg.is_some());
+        /*
+         * If we are rolling backwards to a checkpoint and the checkpoint txg is equal
+         * to the current txg, then delete the checkpoint and continue onwards. In all
+         * other cases, the checkpoint txg is at least one TXG before the current txg.
+         */
+        let checkpoint_txg = if pool_phys.checkpoint_txg == Some(txg) {
+            None
+        } else {
+            pool_phys.checkpoint_txg
+        };
         let pool = Pool {
             state: Arc::new(PoolState {
                 shared_state: shared_state.clone(),
@@ -883,6 +898,7 @@ impl Pool {
                     delete_objects_handle: None,
                     features: phys.features.iter().cloned().collect(),
                     resuming: tx,
+                    checkpoint_txg,
                 })),
                 zettacache: cache,
                 object_block_map,
@@ -914,9 +930,11 @@ impl Pool {
         cache: Option<ZettaCache>,
         id: Uuid,
         syncing_txg: Option<Txg>,
+        rollback: bool,
     ) -> Result<(Pool, Option<UberblockPhys>, BlockId), PoolOpenError> {
         let phys = PoolPhys::get(&object_access, guid).await?;
         if phys.last_txg.0 == 0 {
+            assert!(!rollback);
             let shared_state = Arc::new(PoolSharedState {
                 object_access: object_access.clone(),
                 guid,
@@ -974,6 +992,7 @@ impl Pool {
                         delete_objects_handle: None,
                         features: Default::default(),
                         resuming: tx,
+                        checkpoint_txg: None,
                     })),
                     zettacache: cache,
                     object_block_map,
@@ -994,10 +1013,15 @@ impl Pool {
                 .with_syncing_state(|syncing_state| syncing_state.next_block());
             pool.claim(id).await.map(|_| (pool, None, next_block))
         } else {
+            let target = if rollback {
+                phys.checkpoint_txg.ok_or(PoolOpenError::NoCheckpoint)?
+            } else {
+                txg.unwrap_or(phys.last_txg)
+            };
             let (mut pool, ub, next_block) = Pool::open_from_txg(
                 object_access.clone(),
                 &phys,
-                txg.unwrap_or(phys.last_txg),
+                target,
                 cache,
                 if !object_access.readonly() {
                     Some(heartbeat::start_heartbeat(object_access.clone(), id).await)
@@ -1246,6 +1270,7 @@ impl Pool {
         &self,
         uberblock: Vec<u8>,
         config: Vec<u8>,
+        checkpoint_txg: Option<Txg>,
     ) -> (PoolStatsPhys, Vec<(FeatureFlag, u64)>) {
         let state = &self.state;
 
@@ -1268,6 +1293,18 @@ impl Pool {
 
             assert!(!syncing_state.pending_object.is_pending());
             assert!(syncing_state.pending_unordered_writes.is_empty());
+
+            // We could refactor this into a separate function and define it as a no-op unless
+            // debug_assertions is configured, if we want this to only happen in debug mode.
+            let pool_phys = PoolPhys::get(
+                &state.shared_state.object_access,
+                self.state.shared_state.guid,
+            )
+            .await
+            .unwrap();
+            assert_eq!(pool_phys.checkpoint_txg, checkpoint_txg);
+            assert_eq!(pool_phys.last_txg, syncing_state.last_txg);
+            assert!(pool_phys.destroying_state.is_none());
 
             let stats = syncing_state.stats;
 
@@ -1293,6 +1330,23 @@ impl Pool {
 
             syncing_state.pending_object = PendingObjectState::NotPending(phys.header.next_block);
         }
+
+        if syncing_state.checkpoint_txg.is_none() && checkpoint_txg.is_some() {
+            // When a checkpoint is created, it is for the TXG *before* the one currently syncing.
+            assert_eq!(
+                checkpoint_txg,
+                syncing_state.syncing_txg.unwrap().checked_sub(1)
+            );
+            syncing_state.feature_increment_refcount(&features::CHECKPOINT);
+        } else if syncing_state.checkpoint_txg.is_some() && checkpoint_txg.is_none() {
+            syncing_state.feature_decrement_refcount(&features::CHECKPOINT);
+        } else {
+            // Either there's no checkpoint now or before, or there should be the same checkpoint
+            // txg in both this txg and the previous one.
+            assert_eq!(syncing_state.checkpoint_txg, checkpoint_txg);
+        }
+
+        syncing_state.checkpoint_txg = checkpoint_txg;
 
         try_split_reclaim_logs(state.clone(), &mut syncing_state).await;
         try_reclaim_frees(state.clone(), &mut syncing_state);
@@ -1367,6 +1421,7 @@ impl Pool {
             name: state.shared_state.name.clone(),
             last_txg: txg,
             destroying_state: None,
+            checkpoint_txg,
         }
         .put(&state.shared_state.object_access)
         .await;
@@ -2402,8 +2457,9 @@ async fn try_split_reclaim_logs(state: Arc<PoolState>, syncing_state: &mut PoolS
 
 /// reclaim free blocks from one of our pending-free logs
 /// processes the log with the most space freed
+/// If there is a checkpoint, this is a no-nop.
 fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState) {
-    if syncing_state.reclaim_done.is_some() {
+    if syncing_state.reclaim_done.is_some() || syncing_state.checkpoint_txg.is_some() {
         return;
     }
 
@@ -2734,6 +2790,7 @@ async fn try_condense_object_sizes(
     );
 }
 
+/// If there is a checkpoint, this is a no-op.
 fn clean_metadata(
     state: Arc<PoolState>,
     syncing_state: &mut PoolSyncingState,
@@ -2748,6 +2805,9 @@ fn clean_metadata(
             return None;
         }
     };
+    if syncing_state.checkpoint_txg.is_some() {
+        return None;
+    }
     Some(tokio::spawn(async move {
         let ub = match UberblockPhys::get(
             &state.shared_state.object_access,

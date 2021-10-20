@@ -145,6 +145,7 @@
 #include <sys/spa_impl.h>
 #include <sys/spa_checkpoint.h>
 #include <sys/vdev_impl.h>
+#include <sys/vdev_object_store.h>
 #include <sys/zap.h>
 #include <sys/zfeature.h>
 
@@ -237,6 +238,7 @@ spa_checkpoint_discard_sync_callback(space_map_entry_t *sme, void *arg)
 	mutex_enter(&ms->ms_lock);
 	if (range_tree_is_empty(ms->ms_freeing))
 		vdev_dirty(vd, VDD_METASLAB, ms, sdc->sdc_txg);
+	ASSERT(!vdev_is_object_based(vd));
 	range_tree_add(ms->ms_freeing, sme->sme_offset, sme->sme_run);
 	mutex_exit(&ms->ms_lock);
 
