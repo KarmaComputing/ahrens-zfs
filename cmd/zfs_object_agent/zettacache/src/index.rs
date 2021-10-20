@@ -4,6 +4,7 @@ use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::zettacache::AtimeHistogramPhys;
+use futures_core::Stream;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -60,6 +61,20 @@ impl ZettaCacheIndexPhys {
 
     pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
         self.log.claim(builder);
+    }
+
+    pub fn iter_log_chunks(
+        &self,
+        block_access: Arc<BlockAccess>,
+    ) -> impl Stream<Item = BlockBasedLogChunk<IndexEntry>> {
+        self.log.iter_chunks(block_access)
+    }
+
+    pub fn iter_log_summary(
+        &self,
+        block_access: Arc<BlockAccess>,
+    ) -> impl Stream<Item = BlockBasedLogChunk<BlockBasedLogChunkSummaryEntry<IndexEntry>>> {
+        self.log.iter_summary_chunks(block_access)
     }
 }
 

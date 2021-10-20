@@ -625,11 +625,29 @@ impl ZettaCache {
         if opts.dump_operation_log_raw {
             checkpoint
                 .operation_log
-                .iter_chunks(block_access)
+                .iter_chunks(block_access.clone())
                 .for_each(|chunk| async move {
                     println!("{:#?}", chunk);
                 })
                 .await;
+        }
+
+        if opts.dump_index_log_raw {
+            checkpoint
+                .index
+                .iter_log_chunks(block_access.clone())
+                .for_each(|chunk| async move {
+                    println!("{:#?}", chunk);
+                })
+                .await;
+
+            checkpoint
+                .index
+                .iter_log_summary(block_access.clone())
+                .for_each(|chunk| async move {
+                    println!("{:#?}", chunk);
+                })
+                .await
         }
     }
 

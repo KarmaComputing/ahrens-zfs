@@ -159,6 +159,20 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummaryPhys<T> {
         self.this.claim(builder);
         self.chunk_summary.claim(builder);
     }
+
+    pub fn iter_chunks(
+        &self,
+        block_access: Arc<BlockAccess>,
+    ) -> impl Stream<Item = BlockBasedLogChunk<T>> {
+        self.this.iter_chunks(block_access)
+    }
+
+    pub fn iter_summary_chunks(
+        &self,
+        block_access: Arc<BlockAccess>,
+    ) -> impl Stream<Item = BlockBasedLogChunk<BlockBasedLogChunkSummaryEntry<T>>> {
+        self.chunk_summary.iter_chunks(block_access)
+    }
 }
 
 pub trait BlockBasedLogEntry: 'static + OnDisk + Copy + Clone + Unpin + Send + Sync {}

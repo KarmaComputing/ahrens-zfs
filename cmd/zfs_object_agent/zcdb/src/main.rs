@@ -52,6 +52,11 @@ async fn main() {
                     Arg::with_name("operation-log-raw")
                         .long("operation-log-raw")
                         .help("dump operation log"),
+                )
+                .arg(
+                    Arg::with_name("index-log-raw")
+                        .long("index-log-raw")
+                        .help("dump index log"),
                 ),
         )
         .get_matches();
@@ -64,7 +69,8 @@ async fn main() {
                     DumpStructuresOptions::default()
                         .defaults(!subcommand_matches.is_present("nodefaults"))
                         .spacemaps(subcommand_matches.is_present("spacemaps"))
-                        .operation_log_raw(subcommand_matches.is_present("operation-log-raw")),
+                        .operation_log_raw(subcommand_matches.is_present("operation-log-raw"))
+                        .index_log_raw(subcommand_matches.is_present("index-log-raw")),
                 ),
                 device,
             )

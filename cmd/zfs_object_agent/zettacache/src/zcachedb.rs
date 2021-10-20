@@ -48,6 +48,7 @@ pub struct DumpStructuresOptions {
     pub dump_defaults: bool,
     pub dump_spacemaps: bool,
     pub dump_operation_log_raw: bool,
+    pub dump_index_log_raw: bool,
 }
 
 impl Default for DumpStructuresOptions {
@@ -62,6 +63,7 @@ impl DumpStructuresOptions {
             dump_defaults: true,
             dump_spacemaps: false,
             dump_operation_log_raw: false,
+            dump_index_log_raw: false,
         }
     }
 
@@ -77,6 +79,11 @@ impl DumpStructuresOptions {
 
     pub fn operation_log_raw(mut self, value: bool) -> Self {
         self.dump_operation_log_raw = value;
+        self
+    }
+
+    pub fn index_log_raw(mut self, value: bool) -> Self {
+        self.dump_index_log_raw = value;
         self
     }
 }
