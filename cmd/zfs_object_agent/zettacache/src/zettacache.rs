@@ -254,7 +254,7 @@ impl MergeMessage {
             new_index: next_index.flush().await,
             free_list,
         };
-        trace!("sending progress: index with {} entries ({}MB) last is {:?} flushed in {}ms, and {} frees",
+        debug!("sending progress: index with {} entries ({}MB) last is {:?} flushed in {}ms, and {} frees",
             next_index.log.len(),
             next_index.log.num_bytes() / 1024 / 1024,
             next_index.last_key, timer.elapsed().as_millis(),
@@ -277,7 +277,6 @@ impl MergeState {
         index: &mut ZettaCacheIndex,
         free_list: &mut Vec<IndexValue>,
     ) {
-        trace!("add-or-evict {:?}", entry);
         if entry.value.atime >= self.eviction_cutoff {
             index.append(entry);
         } else {
@@ -308,7 +307,7 @@ impl MergeState {
         let mut timer = Instant::now();
 
         let start_key = next_index.last_key;
-        info!("using {:?} as start key for merge", start_key);
+        debug!("using {:?} as start key for merge", start_key);
         let mut pending_changes_iter = self
             .old_pending_changes
             .range((start_key.map_or(Unbounded, Excluded), Unbounded))
@@ -318,26 +317,26 @@ impl MergeState {
         let mut index_skips = 0;
         let mut count = 0;
         while let Some(entry) = index_stream.next().await {
-            count += 1;
             // This can be a tight loop, so only check the elapsed time every
             // 100 times through, so that .elapsed() doesn't take significant
             // CPU time.
-            if count >= *MERGE_PROGRESS_CHECK_COUNT
-                && timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL
-            {
-                // send free_list and current index phys to checkpointer
-                tx.send(MergeMessage::new_progress(&mut next_index, free_list).await)
-                    .await
-                    .unwrap_or_else(|e| panic!("couldn't send: {}", e));
-                free_list = Vec::new();
-                timer = Instant::now();
+            count += 1;
+            if count >= *MERGE_PROGRESS_CHECK_COUNT {
                 count = 0;
+                if timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL {
+                    // send free_list and current index phys to checkpointer
+                    tx.send(MergeMessage::new_progress(&mut next_index, free_list).await)
+                        .await
+                        .unwrap_or_else(|e| panic!("couldn't send: {}", e));
+                    free_list = Vec::new();
+                    timer = Instant::now();
+                }
             }
             // If the next index is already "started", advance the old index to the start point
             // XXX - would be nice to simply *start* from the start_key, rather than iterate up to it
             if let Some(start_key) = start_key {
                 if entry.key <= start_key {
-                    trace!("skipping index entry: {:?}", entry.key);
+                    //trace!("skipping index entry: {:?}", entry.key);
                     index_skips += 1;
                     continue;
                 }
@@ -346,7 +345,6 @@ impl MergeState {
             // index entry, which must be all Inserts (Removes,
             // RemoveThenInserts, and AtimeUpdates refer to existing Index
             // entries).
-            trace!("next index entry: {:?}", entry);
             while let Some((&pc_key, &PendingChange::Insert(pc_value))) =
                 pending_changes_iter.peek()
             {
@@ -439,23 +437,18 @@ impl MergeState {
         let mut count = 0;
         while let Some((&pc_key, &PendingChange::Insert(pc_value))) = pending_changes_iter.peek() {
             count += 1;
-            if count >= *MERGE_PROGRESS_CHECK_COUNT
-                && timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL
-            {
-                // send free_list and current index phys to checkpointer
-                tx.send(MergeMessage::new_progress(&mut next_index, free_list).await)
-                    .await
-                    .unwrap_or_else(|e| panic!("couldn't send: {}", e));
-                free_list = Vec::new();
-                timer = Instant::now();
+            if count >= *MERGE_PROGRESS_CHECK_COUNT {
                 count = 0;
+                if timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL {
+                    // send free_list and current index phys to checkpointer
+                    tx.send(MergeMessage::new_progress(&mut next_index, free_list).await)
+                        .await
+                        .unwrap_or_else(|e| panic!("couldn't send: {}", e));
+                    free_list = Vec::new();
+                    timer = Instant::now();
+                }
             }
             // Add this new entry to the index
-            trace!(
-                "remaining pending change, appending to new index: {:?} {:?}",
-                pc_key,
-                pc_value
-            );
             self.add_to_index_or_evict(
                 IndexEntry {
                     key: pc_key,

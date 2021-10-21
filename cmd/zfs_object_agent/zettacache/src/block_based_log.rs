@@ -24,11 +24,14 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Instant;
 use util::get_tunable;
+use util::AlignedVec;
 
 lazy_static! {
     // XXX maybe this is wasteful for the smaller logs?
     pub static ref DEFAULT_EXTENT_SIZE: u64 = get_tunable("default_extent_size", 128 * 1024 * 1024);
     static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 200);
+    // Note: kernel sends writes to disk in at most 256K chunks (at least with nvme driver)
+    static ref WRITE_AGGREGATION_SIZE: usize = get_tunable("write_aggregation_size", 256 * 1024);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -208,6 +211,13 @@ pub struct BlockBasedLogChunk<T: BlockBasedLogEntry> {
     entries: Vec<T>,
 }
 
+#[derive(Serialize, Debug)]
+pub struct BlockBasedLogChunkBorrowed<'a, T: BlockBasedLogEntry> {
+    id: ChunkId,
+    offset: LogOffset,
+    entries: &'a [T],
+}
+
 impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     pub fn open(
         block_access: Arc<BlockAccess>,
@@ -259,11 +269,12 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         }
 
         let writes_stream = FuturesUnordered::new();
+        let mut pending_write: Option<(DiskLocation, AlignedVec)> = None;
         for pending_entries_chunk in self.pending_entries.chunks(*ENTRIES_PER_CHUNK) {
-            let chunk = BlockBasedLogChunk {
+            let chunk = BlockBasedLogChunkBorrowed {
                 id: self.phys.next_chunk,
                 offset: self.phys.next_chunk_offset,
-                entries: pending_entries_chunk.to_owned(),
+                entries: pending_entries_chunk,
             };
 
             let first_entry = *chunk.entries.first().unwrap();
@@ -298,14 +309,47 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 raw_chunk.len(),
                 extent.location,
             );
-            // XXX would be better to aggregate lots of buffers into one write
-            writes_stream.push(self.block_access.write_raw(extent.location, raw_chunk));
+            match pending_write {
+                Some((pending_location, pending_vec))
+                    if extent.location != pending_location + pending_vec.len()
+                        || pending_vec.unused_capacity() < raw_chunk.len() =>
+                {
+                    writes_stream.push(
+                        self.block_access
+                            .write_raw(pending_location, pending_vec.into()),
+                    );
+                    pending_write = None;
+                }
+                _ => (),
+            }
+            if pending_write.is_none() && raw_chunk.len() < 2 * *WRITE_AGGREGATION_SIZE {
+                pending_write = Some((
+                    extent.location,
+                    AlignedVec::with_capacity(
+                        *WRITE_AGGREGATION_SIZE,
+                        self.block_access.round_up_to_sector(1),
+                    ),
+                ));
+            }
+            match &mut pending_write {
+                Some((pending_location, pending_vec)) => {
+                    assert_eq!(*pending_location + pending_vec.len(), extent.location);
+                    pending_vec.extend_from_slice(&raw_chunk);
+                }
+                None => writes_stream.push(self.block_access.write_raw(extent.location, raw_chunk)),
+            }
 
             new_chunk_fn(chunk.id, chunk.offset, first_entry);
 
             self.phys.num_entries += chunk.entries.len() as u64;
             self.phys.next_chunk = self.phys.next_chunk.next();
             self.phys.next_chunk_offset.0 += raw_size;
+        }
+        if let Some((pending_location, pending_vec)) = pending_write {
+            writes_stream.push(
+                self.block_access
+                    .write_raw(pending_location, pending_vec.into()),
+            );
         }
         writes_stream.for_each(|_| async move {}).await;
         self.pending_entries.truncate(0);

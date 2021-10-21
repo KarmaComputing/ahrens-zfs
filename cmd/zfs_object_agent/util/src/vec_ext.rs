@@ -115,6 +115,10 @@ impl AlignedVec {
         self.len() == 0
     }
 
+    pub fn unused_capacity(&self) -> usize {
+        self.vec.capacity() - self.vec.len()
+    }
+
     pub fn as_ptr(&self) -> *const u8 {
         self.vec[self.pad..].as_ptr()
     }

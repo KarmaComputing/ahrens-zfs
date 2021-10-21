@@ -5,9 +5,11 @@ use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::zettacache::AtimeHistogramPhys;
 use futures_core::Stream;
+use log::*;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct IndexKey {
@@ -98,11 +100,14 @@ impl ZettaCacheIndex {
         extent_allocator: Arc<ExtentAllocator>,
         phys: ZettaCacheIndexPhys,
     ) -> Self {
-        Self {
+        let begin = Instant::now();
+        let index = ZettaCacheIndex {
             last_key: phys.last_key,
             atime_histogram: phys.atime_histogram,
             log: BlockBasedLogWithSummary::open(block_access, extent_allocator, phys.log).await,
-        }
+        };
+        info!("loaded Index summary in {}ms", begin.elapsed().as_millis());
+        index
     }
 
     pub async fn flush(&mut self) -> ZettaCacheIndexPhys {

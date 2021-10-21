@@ -4,7 +4,7 @@ use crate::extent_allocator::{ExtentAllocator, ExtentAllocatorBuilder};
 use crate::space_map::{SpaceMap, SpaceMapEntry, SpaceMapPhys};
 use crate::zettacache::DEFAULT_SLAB_SIZE;
 use lazy_static::lazy_static;
-use log::{debug, trace};
+use log::*;
 use more_asserts::*;
 use num::range;
 use roaring::RoaringBitmap;
@@ -769,6 +769,7 @@ impl BlockAllocator {
         extent_allocator: Arc<ExtentAllocator>,
         phys: BlockAllocatorPhys,
     ) -> BlockAllocator {
+        let begin = Instant::now();
         let spacemap = SpaceMap::open(
             block_access.clone(),
             extent_allocator.clone(),
@@ -882,6 +883,11 @@ impl BlockAllocator {
                 }
             }
         }
+
+        info!(
+            "loaded BlockAllocator metadata in {}ms",
+            begin.elapsed().as_millis()
+        );
 
         BlockAllocator {
             coverage,
@@ -1030,7 +1036,7 @@ impl BlockAllocator {
                         return Some(extent);
                     }
                     None => {
-                        debug!(
+                        trace!(
                             "BLOCK-ALLOCATOR: allocation of {} bytes failed; no free slabs left; {} slabs used for {} byte bucket",
                             request_size,
                             slabs_in_bucket,
