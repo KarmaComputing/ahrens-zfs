@@ -10,6 +10,7 @@ use nvpair::NvList;
 use rusoto_s3::S3;
 use std::sync::{Arc, Mutex};
 use util::get_tunable;
+use util::maybe_die_with;
 use zettacache::base_types::*;
 
 lazy_static! {
@@ -84,6 +85,7 @@ impl PublicConnectionState {
             );
         }
 
+        maybe_die_with(|| "in get_pools_impl");
         let response = Arc::new(Mutex::new(NvList::new_unique_names()));
         for buck in buckets {
             let object_access = Arc::new(ObjectAccess::from_client(

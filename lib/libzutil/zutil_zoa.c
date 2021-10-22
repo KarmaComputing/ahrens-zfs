@@ -52,14 +52,33 @@ read_all(int fd, void *buf, size_t len)
 {
 	size_t read_total = 0;
 	while (read_total < len) {
-		size_t rc = read(fd, buf + read_total, len - read_total);
+		int rc = read(fd, buf + read_total, len - read_total);
 		if (rc > 0) {
 			read_total += rc;
 		} else if (rc < 0) {
-			return (rc);
+			return (-errno);
+		} else {
+			return (-ENETDOWN);
 		}
 	}
 	return (read_total);
+}
+
+static int
+write_all(int fd, void *buf, size_t len)
+{
+	size_t write_total = 0;
+	while (write_total < len) {
+		int rc = write(fd, buf + write_total, len - write_total);
+		if (rc > 0) {
+			write_total += rc;
+		} else if (rc < 0) {
+			return (-errno);
+		} else {
+			return (-ENETDOWN);
+		}
+	}
+	return (write_total);
 }
 
 static struct sockaddr *
@@ -117,42 +136,35 @@ zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock)
 	return (sock);
 }
 
-nvlist_t *
-zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg, zoa_socket_t zoa_sock)
+static nvlist_t *
+zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock,
+    int *err)
 {
-	int sock = zoa_connect_agent(hdl, zoa_sock);
-	if (sock == -1) {
-		fnvlist_free(msg);
-		return (NULL);
-	}
-
 	size_t len;
 	char *buf = fnvlist_pack(msg, &len);
-	fnvlist_free(msg);
 
 	uint64_t len_le = htole64(len);
-	ssize_t rv = write(sock, &len_le, sizeof (len_le));
+	ssize_t rv = write_all(sock, &len_le, sizeof (len_le));
 	if (rv < 0) {
+		*err = rv;
 		fnvlist_pack_free(buf, len);
-		close(sock);
 		return (NULL);
 	}
 	ASSERT3U(rv, ==, sizeof (len_le));
 
-	rv = write(sock, buf, len);
+	rv = write_all(sock, buf, len);
 	fnvlist_pack_free(buf, len);
-
 	if (rv < 0) {
-		close(sock);
+		*err = rv;
 		return (NULL);
 	}
-	VERIFY3U(rv, ==, len); // XXX We need to handle partial writes here.
+	VERIFY3U(rv, ==, len);
 
 	uint64_t resp_size;
 	size_t size;
 	rv = read_all(sock, &resp_size, sizeof (resp_size));
 	if (rv < 0) {
-		close(sock);
+		*err = rv;
 		return (NULL);
 	}
 	VERIFY3U(rv, ==, sizeof (resp_size));
@@ -161,8 +173,8 @@ zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg, zoa_socket_t zoa_sock)
 	buf = malloc(size);
 
 	rv = read_all(sock, buf, size);
-	close(sock);
 	if (rv < 0) {
+		*err = rv;
 		free(buf);
 		return (NULL);
 	}
@@ -171,6 +183,43 @@ zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg, zoa_socket_t zoa_sock)
 	nvlist_t *resp = fnvlist_unpack(buf, size);
 	free(buf);
 
+	return (resp);
+}
+
+nvlist_t *
+zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg, zoa_socket_t zoa_sock)
+{
+	nvlist_t *resp = NULL;
+	int retries = 0;
+	for (; retries < ZOA_MAX_RETRIES; retries++) {
+		int sock = zoa_connect_agent(hdl, zoa_sock);
+		if (sock == -1) {
+			break;
+		}
+
+		int err = 0;
+		resp = zoa_send_recv_msg_impl(sock, msg, ZFS_PUBLIC_SOCKET,
+		    &err);
+		close(sock);
+		if (err == 0) {
+			break;
+		} else if (err != -ENETDOWN && err != -ECONNRESET) {
+			zutil_error_fmt(hdl, EZFS_CONNECTION_ERROR,
+			    dgettext(TEXT_DOMAIN,
+			    "error communicating with object agent: %d"), err);
+			break;
+		}
+		(void) zutil_error_fmt(hdl, EZFS_CONNECTION_ERROR,
+		    dgettext(TEXT_DOMAIN,
+		    "retrying on object agent error: %d"), err);
+	}
+	if (retries == ZOA_MAX_RETRIES) {
+		(void) zutil_error_fmt(hdl, EZFS_CONNECTION_ERROR,
+		    dgettext(TEXT_DOMAIN, "giving up after %d retries"),
+		    retries);
+	}
+
+	fnvlist_free(msg);
 	return (resp);
 }
 

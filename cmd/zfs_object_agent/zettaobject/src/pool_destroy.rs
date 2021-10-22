@@ -19,6 +19,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use util::get_tunable;
+use util::maybe_die_with;
 use zettacache::base_types::*;
 
 lazy_static! {
@@ -428,6 +429,8 @@ pub async fn destroy_pool(
         .await
         .unwrap();
     start_destroy_task(object_access, guid);
+
+    maybe_die_with(|| "after destroy_pool");
 }
 
 /// Resume destroying a pool that was previously marked for destroying.
@@ -442,6 +445,8 @@ pub async fn resume_destroy(object_access: Arc<ObjectAccess>, guid: PoolGuid) ->
                     .add_zpool_destroy_cache(&object_access, guid)
                     .await?;
                 start_destroy_task(object_access, guid);
+                maybe_die_with(|| "in resume_destroy");
+
                 Ok(())
             }
             None => Err(anyhow!("pool {} not in destroyed state", guid)),
@@ -452,6 +457,8 @@ pub async fn resume_destroy(object_access: Arc<ObjectAccess>, guid: PoolGuid) ->
 
 /// Retrieve the PoolDestroyer's list of pools that are either being destroyed or have been destroyed.
 pub async fn get_destroy_list() -> NvList {
+    maybe_die_with(|| "in get_destroy_list");
+
     let maybe_pool_destroyer = POOL_DESTROYER.lock().await;
     maybe_pool_destroyer
         .as_ref()
@@ -462,6 +469,8 @@ pub async fn get_destroy_list() -> NvList {
 
 /// Remove pools that have been successfully destroyed from the PoolDestroyer's list of pools.
 pub async fn remove_not_in_progress() {
+    maybe_die_with(|| "in remove_not_in_progress");
+
     let mut maybe_pool_destroyer = POOL_DESTROYER.lock().await;
     let pool_destroyer = maybe_pool_destroyer.as_mut().unwrap();
     pool_destroyer

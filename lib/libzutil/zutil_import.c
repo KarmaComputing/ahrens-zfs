@@ -109,7 +109,7 @@ zutil_verror(libpc_handle_t *hdl, const char *error, const char *fmt,
 	}
 }
 
-static __attribute__((format(printf, 3, 4))) int
+__attribute__((format(printf, 3, 4))) int
 zutil_error_fmt(libpc_handle_t *hdl, const char *error, const char *fmt, ...)
 {
 	va_list ap;

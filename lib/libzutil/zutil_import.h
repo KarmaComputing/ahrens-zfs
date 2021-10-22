@@ -35,6 +35,7 @@
 #define	EZFS_SOCKETFAILURE	"socket failure"
 #define	EZFS_CONNECT_REFUSED	"agent may not be running"
 #define	EZFS_CONNECT_RETRY	"retrying connection"
+#define	EZFS_CONNECTION_ERROR	"error communicating with agent"
 
 #define	IMPORT_ORDER_PREFERRED_1	1
 #define	IMPORT_ORDER_PREFERRED_2	2
@@ -60,6 +61,8 @@ void * zutil_alloc(libpc_handle_t *hdl, size_t size);
 char *zutil_strdup(libpc_handle_t *hdl, const char *str);
 int zutil_error(libpc_handle_t *hdl, const char *error, const char *msg);
 void zutil_error_aux(libpc_handle_t *hdl, const char *fmt, ...);
+int zutil_error_fmt(libpc_handle_t *hdl, const char *error,
+    const char *fmt, ...);
 
 typedef struct rdsk_node {
 	char *rn_name;			/* Full path to device */
