@@ -97,6 +97,8 @@ lazy_static! {
     static ref METADATA_RETENTION_TXGS: u64 = get_tunable("metadata_retention_txgs", 128);
 
     static ref WRITES_INGEST_TO_ZETTACACHE: bool = get_tunable("writes_ingest_to_zettacache", true);
+
+    static ref SIBLING_BLOCKS_INGEST_TO_ZETTACACHE: bool = get_tunable("sibling_blocks_ingest_to_zettacache", false);
 }
 
 const ONE_MIB: u64 = 1_048_576;
@@ -1702,35 +1704,43 @@ impl Pool {
                     LookupResponse::Absent(key) => {
                         let mut data_object = self.read_object_for_block(block, heal).await;
                         let bytes = data_object.blocks.remove(&block).unwrap();
-                        join(
-                            async {
-                                cache
-                                    .insert(key, bytes.clone().into(), InsertSource::Read)
-                                    .await;
-                            },
-                            async {
-                                data_object
-                                    .blocks
-                                    .into_iter()
-                                    .map(|(b, bytes)| async move {
-                                        if let LookupResponse::Absent(key) =
-                                            cache.lookup(self.state.shared_state.guid, b).await
-                                        {
-                                            cache
-                                                .insert(
-                                                    key,
-                                                    bytes.clone().into(),
-                                                    InsertSource::SpeculativeRead,
-                                                )
-                                                .await;
-                                        }
-                                    })
-                                    .collect::<FuturesUnordered<_>>()
-                                    .for_each(|_| async move {})
-                                    .await;
-                            },
-                        )
-                        .await;
+
+                        let demand_read = async {
+                            cache
+                                .insert(key, bytes.clone().into(), InsertSource::Read)
+                                .await;
+                        };
+
+                        let speculative_reads = async {
+                            data_object
+                                .blocks
+                                .into_iter()
+                                .map(|(b, bytes)| async move {
+                                    if let LookupResponse::Absent(key) =
+                                        cache.lookup(self.state.shared_state.guid, b).await
+                                    {
+                                        cache
+                                            .insert(
+                                                key,
+                                                bytes.clone().into(),
+                                                InsertSource::SpeculativeRead,
+                                            )
+                                            .await;
+                                    }
+                                })
+                                .collect::<FuturesUnordered<_>>()
+                                .for_each(|_| async move {})
+                                .await;
+                        };
+
+                        match *SIBLING_BLOCKS_INGEST_TO_ZETTACACHE {
+                            true => {
+                                join(demand_read, speculative_reads).await;
+                            }
+                            false => {
+                                demand_read.await;
+                            }
+                        }
 
                         bytes
                     }
