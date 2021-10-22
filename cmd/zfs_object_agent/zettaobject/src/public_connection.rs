@@ -8,8 +8,6 @@ use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvList;
 use rusoto_s3::S3;
-use std::fs;
-use std::os::unix::prelude::PermissionsExt;
 use std::sync::{Arc, Mutex};
 use util::get_tunable;
 use zettacache::base_types::*;
@@ -29,8 +27,10 @@ impl PublicServerState {
 
     pub fn start(socket_dir: &str) {
         let socket_path = format!("{}/zfs_public_socket", socket_dir);
+
         let mut server = Server::new(
             &socket_path,
+            0o666, // world writable
             PublicServerState {},
             Box::new(Self::connection_handler),
         );
@@ -38,11 +38,6 @@ impl PublicServerState {
         PublicConnectionState::register(&mut server);
 
         server.start();
-
-        // Set the socket to world writable.
-        let mut perms = fs::metadata(&socket_path).unwrap().permissions();
-        perms.set_mode(0o666);
-        fs::set_permissions(&socket_path, perms).unwrap();
     }
 }
 

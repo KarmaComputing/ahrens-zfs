@@ -51,6 +51,7 @@ impl RootServerState {
         let socket_path = format!("{}/zfs_root_socket", socket_dir);
         let mut server = Server::new(
             &socket_path,
+            0o600,
             RootServerState {
                 cache,
                 id: Uuid::new_v4(),

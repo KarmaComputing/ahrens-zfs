@@ -14,6 +14,8 @@ use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvEncoding, NvList};
 use std::collections::HashMap;
+use std::fs;
+use std::os::unix::prelude::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,6 +35,7 @@ lazy_static! {
 // Cs: ConnectionState (consumer's state associated with the connection)
 pub struct Server<Ss, Cs> {
     socket_path: String,
+    socket_permission: u32,
     state: Ss,
     connection_handler: Box<ConnectionHandler<Ss, Cs>>,
     handlers: HashMap<String, HandlerEnum<Cs>>,
@@ -59,11 +62,13 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
     /// connection_state (Cs), which is passed to each of the Handlers.
     pub fn new(
         socket_path: &str,
+        socket_permission: u32,
         server_state: Ss,
         connection_handler: Box<ConnectionHandler<Ss, Cs>>,
     ) -> Server<Ss, Cs> {
         Server {
             socket_path: socket_path.to_owned(),
+            socket_permission,
             state: server_state,
             connection_handler,
             handlers: Default::default(),
@@ -104,9 +109,22 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
     /// task which will accept connections on it.
     pub fn start(self) {
         let arc = Arc::new(self);
-        info!("Listening on: {}", arc.socket_path);
+
+        // Create a temp socket file, set permissions and move it to the correct location.
+        let socket_path_tmp = format!("{}.tmp", arc.socket_path);
+
+        let _ = std::fs::remove_file(&socket_path_tmp);
         let _ = std::fs::remove_file(&arc.socket_path);
-        let listener = UnixListener::bind(&arc.socket_path).unwrap();
+
+        let listener = UnixListener::bind(&socket_path_tmp).unwrap();
+
+        let mut perms = fs::metadata(&socket_path_tmp).unwrap().permissions();
+        perms.set_mode(arc.socket_permission);
+        fs::set_permissions(&socket_path_tmp, perms).unwrap();
+        fs::rename(socket_path_tmp, &arc.socket_path).unwrap();
+
+        info!("Listening on: {}", arc.socket_path);
+
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
