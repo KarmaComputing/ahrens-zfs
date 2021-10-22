@@ -374,10 +374,20 @@ impl ObjectAccess {
                         c.reading.insert(key.clone(), rx);
                         Either::Left(async move {
                             let v = self.get_object_impl(key.clone(), stat_type, None).await?;
+
+                            // If the key was removed, there may be no more
+                            // receivers, so we can't unwrap().
+                            tx.send(Some(v.clone())).ok();
+
+                            // If the entry was already removed from the
+                            // hashtable, that indicates that a put_object() has
+                            // invalidated this cache entry, so we don't want to
+                            // add this potentially-stale value to the cache.
+                            // See invalidate_cache() for details.
                             let mut myc = CACHE.lock().unwrap();
-                            tx.send(Some(v.clone())).unwrap();
-                            myc.cache.put(key.to_string(), v.clone());
-                            myc.reading.remove(&key);
+                            if myc.reading.remove(&key).is_some() {
+                                myc.cache.put(key.to_string(), v.clone());
+                            }
                             Ok(v)
                         })
                     }
@@ -537,7 +547,14 @@ impl ObjectAccess {
     }
 
     fn invalidate_cache(key: String) {
-        CACHE.lock().unwrap().cache.pop(&key);
+        let mut cache = CACHE.lock().unwrap();
+        cache.cache.pop(&key);
+        // If there's a concurrent read going on, it may get the old value,
+        // which is fine.  But we can't allow new readers to see the old value,
+        // so don't allow them to receive the value from an in-progress read.
+        // Removing the key here (if present) also informs the in-progress
+        // reader to not add the potentially-stale value to the cache.
+        cache.reading.remove(&key);
     }
 
     pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessStatType) {
