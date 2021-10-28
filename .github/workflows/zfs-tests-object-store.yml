@@ -75,7 +75,14 @@ jobs:
         RESULTS_PATH=$(readlink -f /var/tmp/test_results/current)
         sudo dmesg > $RESULTS_PATH/dmesg
         sudo cp /var/log/syslog $RESULTS_PATH/
-        sudo tar czvf $RESULTS_PATH/zoa_logs.tgz /var/log/zoa
+        # Stop the zfs-object-agent to prevent it from writing
+        # into the /var/log/zoa
+        sudo systemctl stop zfs-object-agent.service
+        # The create archive command may exit with status 1 if the
+        # files are being updated while the tar command is running
+        # Thus we do a clean exit in such case for the next
+        # instructions in the sequence to run
+        sudo tar czvf $RESULTS_PATH/zoa_logs.tgz /var/log/zoa || true
         sudo chmod +r $RESULTS_PATH/*
         # Replace ':' in dir names, actions/upload-artifact doesn't support it
         for f in $(find $RESULTS_PATH -name '*:*'); do mv "$f" "${f//:/__}"; done
