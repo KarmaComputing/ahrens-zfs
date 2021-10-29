@@ -39,6 +39,7 @@
 .Op Oo Oo Fl c Ar SCRIPT Oc Oo Fl lq Oc Oc Ns | Ns Fl rw
 .Op Fl T Sy u Ns | Ns Sy d
 .Op Fl ghHLnpPvy
+.Op Fl o Oo Fl l|q|r|w Oc
 .Oo Ar pool Ns … Ns | Ns Oo Ar pool vdev Ns … Oc Ns | Ns Ar vdev Ns … Oc
 .Op Ar interval Op Ar count
 .
@@ -179,6 +180,39 @@ data object get/put requests to object store, a result of object_agent_io
 object store specific metadata get/put requests to object store.
 .It Sy object_store_reclaim
 freed data blocks from object store.
+.El
+.It Fl ol
+Include average latency statistics when displaying statistics for object storage
+based pools.
+.Bl -tag -compact -width "asyncq_read/write"
+.It Sy object_agent_total
+Average total I/O time (round trip from kernel to object agent).
+.It Sy object_store_total
+Average backend I/O time (time getting/putting to the object store).
+.El
+.It Fl oq
+Include active queue statistics when displaying statistics for object storage
+based pools.
+The
+.Sy active
+column represents active get/put requests that have been issued to the
+object store and are waiting for completion.
+.Pp
+Note: These active statistics are instantaneous measurements of the number
+of entries that are in-flight.
+If you specify an interval, the measurements will be sampled from the end
+of the interval.
+.It Fl or
+Display request size histograms for object storage based pools.
+This includes histograms of individual read/write request from the zfs
+kernel module and the get/put request to the object storage.
+.It Fl ow
+Display latency histograms for object storage based pools.
+.Bl -tag -compact -width "asyncq_read/write"
+.It Sy object_agent_total
+Total I/O time (round trip from kernel to object agent).
+.It Sy object_store_total
+The backend I/O time (i.e. Get/Put/Delete times to the object store).
 .El
 .It Fl p
 Display numbers in parsable (exact) values.

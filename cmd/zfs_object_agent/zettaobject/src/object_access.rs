@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use arr_macro::arr;
 use async_stream::stream;
 use bytes::{Bytes, BytesMut};
 use core::time::Duration;
@@ -55,7 +56,7 @@ lazy_static! {
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
 }
 
-#[derive(Debug, Enum, Clone, Copy)]
+#[derive(Debug, Enum, Copy, Clone)]
 pub enum ObjectAccessStatType {
     ReadsGet,
     TxgSyncPut,
@@ -66,35 +67,152 @@ pub enum ObjectAccessStatType {
     ObjectDelete,
 }
 
+#[derive(Debug, Enum)]
+enum LatencyHistogramType {
+    Gets,
+    Puts,
+    Deletes,
+}
+
+#[derive(Debug, Enum)]
+enum RequestSizeHistogramType {
+    Gets,
+    Puts,
+    Deletes,
+}
+
 impl Display for ObjectAccessStatType {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
+impl Display for LatencyHistogramType {
+    // Note: display here is also used as our nvlist key
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "LatencyHistogram{:?}", self)
+    }
+}
+
+impl Display for RequestSizeHistogramType {
+    // Note: display here is also used as our nvlist key
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "RequestHistogram{:?}", self)
+    }
+}
+
+// These are equivalent to VDEV_L_HISTO_BUCKETS and VDEV_RQ_HISTO_BUCKETS in zfs.h
+pub const LATENCY_HISTOGRAM_BUCKETS: u32 = 37;
+pub const REQUEST_SIZE_HISTOGRAM_BUCKETS: u32 = 25;
+
+struct LatencyHistogram(pub [AtomicU64; LATENCY_HISTOGRAM_BUCKETS as usize]);
+struct RequestSizeHistogram(pub [AtomicU64; REQUEST_SIZE_HISTOGRAM_BUCKETS as usize]);
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        LatencyHistogram(arr![AtomicU64::default(); 37])
+    }
+}
+
+impl Default for RequestSizeHistogram {
+    fn default() -> Self {
+        RequestSizeHistogram(arr![AtomicU64::default(); 25])
+    }
+}
+
 #[derive(Default)]
-struct ObjectAccessStats {
+struct StatTypeCounts {
     operations: AtomicU64,
     total_bytes: AtomicU64,
+    active_count: AtomicU64,
+}
+
+struct ObjectAccessStats {
+    timebase: Instant,
+    counters: EnumMap<ObjectAccessStatType, StatTypeCounts>,
+    latency_histograms: EnumMap<LatencyHistogramType, LatencyHistogram>,
+    request_size_histograms: EnumMap<RequestSizeHistogramType, RequestSizeHistogram>,
+}
+
+#[must_use]
+struct OpInProgress<'a> {
+    stat_type: ObjectAccessStatType,
+    begin: Instant,
+    stats: &'a ObjectAccessStats,
+}
+
+impl<'a> OpInProgress<'a> {
+    fn new(stat_type: ObjectAccessStatType, stats: &'a ObjectAccessStats) -> Self {
+        stats.counters[stat_type]
+            .active_count
+            .fetch_add(1, Ordering::Relaxed);
+        OpInProgress {
+            stat_type,
+            begin: Instant::now(),
+            stats,
+        }
+    }
+
+    fn end(self, bytes: u64) {
+        let latency = self.begin.elapsed().as_nanos();
+        let counters = &self.stats.counters[self.stat_type];
+        counters.operations.fetch_add(1, Ordering::Relaxed);
+        counters.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+
+        // This bucket mapping is equivalent to L_HISTO() macro in zfs.h
+        let latency_bucket = std::cmp::min(
+            latency.next_power_of_two().trailing_zeros(),
+            LATENCY_HISTOGRAM_BUCKETS - 1,
+        ) as usize;
+
+        // This bucket mapping is equivalent to RQ_HISTO() macro in zfs.h
+        let request_bucket = std::cmp::min(
+            bytes.next_power_of_two().trailing_zeros(),
+            REQUEST_SIZE_HISTOGRAM_BUCKETS - 1,
+        ) as usize;
+
+        // Map the ObjectAccessStatType to the corresponding histogram type
+        let (latency_type, request_type) = match self.stat_type {
+            ObjectAccessStatType::ReadsGet
+            | ObjectAccessStatType::ReclaimGet
+            | ObjectAccessStatType::MetadataGet => {
+                (LatencyHistogramType::Gets, RequestSizeHistogramType::Gets)
+            }
+            ObjectAccessStatType::TxgSyncPut
+            | ObjectAccessStatType::ReclaimPut
+            | ObjectAccessStatType::MetadataPut => {
+                (LatencyHistogramType::Puts, RequestSizeHistogramType::Puts)
+            }
+            ObjectAccessStatType::ObjectDelete => (
+                LatencyHistogramType::Deletes,
+                RequestSizeHistogramType::Deletes,
+            ),
+        };
+        self.stats.latency_histograms[latency_type].0[latency_bucket]
+            .fetch_add(1, Ordering::Relaxed);
+        self.stats.request_size_histograms[request_type].0[request_bucket]
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl<'a> Drop for OpInProgress<'a> {
+    fn drop(&mut self) {
+        let counters = &self.stats.counters[self.stat_type];
+        counters.active_count.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl ObjectAccessStats {
-    fn record_operation(&self, bytes: u64) {
-        self.operations.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+    fn begin(&self, stat_type: ObjectAccessStatType) -> OpInProgress<'_> {
+        OpInProgress::new(stat_type, self)
     }
 }
 
-impl Display for ObjectAccessStats {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{} operations, {} bytes",
-            self.operations.load(Ordering::Relaxed),
-            self.total_bytes.load(Ordering::Relaxed)
-        )?;
-        Ok(())
-    }
+#[derive(Debug)]
+pub enum StatMapValue {
+    Counter(u64),
+    CounterMap(HashMap<String, u64>),
+    Histogram(Vec<u64>),
 }
 
 pub struct ObjectAccess {
@@ -104,8 +222,7 @@ pub struct ObjectAccess {
     region_str: String,
     endpoint_str: String,
     credentials_profile: Option<String>,
-    access_stats: EnumMap<ObjectAccessStatType, ObjectAccessStats>,
-    timebase: Instant,
+    access_stats: ObjectAccessStats,
 }
 
 #[derive(Debug)]
@@ -268,8 +385,12 @@ impl ObjectAccess {
             region_str: region.to_string(),
             endpoint_str: endpoint.to_string(),
             credentials_profile: None,
-            access_stats: Default::default(),
-            timebase: Instant::now(),
+            access_stats: ObjectAccessStats {
+                timebase: Instant::now(),
+                counters: Default::default(),
+                latency_histograms: Default::default(),
+                request_size_histograms: Default::default(),
+            },
         })
     }
 
@@ -287,8 +408,12 @@ impl ObjectAccess {
             region_str: region_str.to_string(),
             endpoint_str: endpoint.to_string(),
             credentials_profile,
-            access_stats: Default::default(),
-            timebase: Instant::now(),
+            access_stats: ObjectAccessStats {
+                timebase: Instant::now(),
+                counters: Default::default(),
+                latency_histograms: Default::default(),
+                request_size_histograms: Default::default(),
+            },
         })
     }
 
@@ -298,6 +423,7 @@ impl ObjectAccess {
         stat_type: ObjectAccessStatType,
         timeout: Option<Duration>,
     ) -> Result<Bytes> {
+        let op = self.access_stats.begin(stat_type);
         let msg = format!("get {}", key);
         let bytes = retry(&msg, timeout, || async {
             let req = GetObjectRequest {
@@ -326,7 +452,6 @@ impl ObjectAccess {
                     Err(OAError::RequestError(e.into()))
                 }
                 Ok(_) => {
-                    self.access_stats[stat_type].record_operation(v.len() as u64);
                     trace!(
                         "{}: got {} bytes of data in {} chunks in {}ms",
                         msg,
@@ -341,6 +466,7 @@ impl ObjectAccess {
         .await
         .with_context(|| format!("Failed to {}", msg))?;
 
+        op.end(bytes.len() as u64);
         Ok(bytes.into())
     }
 
@@ -527,10 +653,11 @@ impl ObjectAccess {
         stat_type: ObjectAccessStatType,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
-        let len = bytes.len();
         assert!(!self.readonly);
-        self.access_stats[stat_type].record_operation(len as u64);
-        retry(&format!("put {} ({} bytes)", key, len), timeout, || async {
+        let len = bytes.len();
+        let op = self.access_stats.begin(stat_type);
+
+        let result = retry(&format!("put {} ({} bytes)", key, len), timeout, || async {
             let my_bytes = bytes.clone();
             let stream = ByteStream::new_with_size(stream! { yield Ok(my_bytes)}, len);
 
@@ -543,7 +670,9 @@ impl ObjectAccess {
             // Note: Ok(...?) converts the RusotoError to an OAError for us
             Ok(self.client.put_object(req).await?)
         })
-        .await
+        .await;
+        op.end(len as u64);
+        result
     }
 
     fn invalidate_cache(key: String) {
@@ -600,6 +729,8 @@ impl ObjectAccess {
             .for_each(|chunk| async move {
                 let msg = format!("delete {} objects including {}", chunk.len(), &chunk[0]);
                 assert!(!self.readonly);
+                let op = self.access_stats.begin(ObjectAccessStatType::ObjectDelete);
+
                 retry(&msg, None, || async {
                     let req = DeleteObjectsRequest {
                         bucket: self.bucket_str.clone(),
@@ -626,9 +757,7 @@ impl ObjectAccess {
                 })
                 .await
                 .unwrap();
-                self.access_stats[ObjectAccessStatType::ObjectDelete]
-                    .operations
-                    .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                op.end(0);
             })
             .await;
     }
@@ -661,7 +790,7 @@ impl ObjectAccess {
             stat_types
                 .iter()
                 .map(|&stat_type| {
-                    self.access_stats[stat_type]
+                    self.access_stats.counters[stat_type]
                         .operations
                         .load(Ordering::Relaxed)
                 })
@@ -672,8 +801,19 @@ impl ObjectAccess {
             stat_types
                 .iter()
                 .map(|&stat_type| {
-                    self.access_stats[stat_type]
+                    self.access_stats.counters[stat_type]
                         .total_bytes
+                        .load(Ordering::Relaxed)
+                })
+                .sum(),
+        );
+        total.insert(
+            "active".into(),
+            stat_types
+                .iter()
+                .map(|&stat_type| {
+                    self.access_stats.counters[stat_type]
+                        .active_count
                         .load(Ordering::Relaxed)
                 })
                 .sum(),
@@ -682,38 +822,56 @@ impl ObjectAccess {
         total
     }
 
-    pub fn collect_stats(&self) -> (HashMap<String, HashMap<String, u64>>, u64) {
+    pub fn collect_stats(&self) -> HashMap<String, StatMapValue> {
         let mut outer = HashMap::new();
         let order = Ordering::Relaxed;
 
-        for (t, s) in self.access_stats.iter() {
+        // Note: try_from() will always succeed since 2^64 ns is 580 years, and it's
+        // inconceivable that the object agent could be running for that long.
+        let timestamp = u64::try_from(self.access_stats.timebase.elapsed().as_nanos()).unwrap();
+        outer.insert("Timestamp".into(), StatMapValue::Counter(timestamp));
+
+        // Add the named counters for each stat type
+        for (t, s) in self.access_stats.counters.iter() {
             let mut inner = HashMap::new();
             inner.insert("operations".into(), s.operations.load(order));
             inner.insert("total_bytes".into(), s.total_bytes.load(order));
-            outer.insert(t.to_string(), inner);
+            inner.insert("active".into(), s.active_count.load(order));
+            outer.insert(t.to_string(), StatMapValue::CounterMap(inner));
         }
 
-        // We know that the elapsed time since ObjectAccess was initialized fits in u64
-        let timestamp = u64::try_from(self.timebase.elapsed().as_nanos()).unwrap();
+        // Add the histograms
+        for (t, h) in self.access_stats.latency_histograms.iter() {
+            outer.insert(
+                t.to_string(),
+                StatMapValue::Histogram(h.0.iter().map(|v: &AtomicU64| v.load(order)).collect()),
+            );
+        }
+        for (t, h) in self.access_stats.request_size_histograms.iter() {
+            outer.insert(
+                t.to_string(),
+                StatMapValue::Histogram(h.0.iter().map(|v: &AtomicU64| v.load(order)).collect()),
+            );
+        }
 
-        // Sum the Gets and Puts into a total for each category
+        // Sum the Gets and Puts into a total for each counter
         outer.insert(
             "TotalGet".into(),
-            self.sum_stats(&[
+            StatMapValue::CounterMap(self.sum_stats(&[
                 ObjectAccessStatType::ReadsGet,
                 ObjectAccessStatType::MetadataGet,
                 ObjectAccessStatType::ReclaimGet,
-            ]),
+            ])),
         );
         outer.insert(
             "TotalPut".into(),
-            self.sum_stats(&[
+            StatMapValue::CounterMap(self.sum_stats(&[
                 ObjectAccessStatType::TxgSyncPut,
                 ObjectAccessStatType::MetadataPut,
                 ObjectAccessStatType::ReclaimPut,
-            ]),
+            ])),
         );
 
-        (outer, timestamp)
+        outer
     }
 }

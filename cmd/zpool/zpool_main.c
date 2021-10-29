@@ -195,6 +195,9 @@ enum iostat_type {
 	IOS_RQ_HISTO = 4,
 	IOS_OBJECT_STORE = 5,
 	IOS_OBJECT_LATENCY = 6,
+	IOS_OBJECT_ACTIVE = 7,
+	IOS_OBJECT_LAT_HISTO = 8,
+	IOS_OBJECT_REQ_HISTO = 9,
 	IOS_COUNT,	/* always last element */
 };
 
@@ -206,11 +209,21 @@ enum iostat_type {
 #define	IOS_RQ_HISTO_M		(1ULL << IOS_RQ_HISTO)
 #define	IOS_OBJECT_STORE_M	(1ULL << IOS_OBJECT_STORE)
 #define	IOS_OBJECT_LATENCY_M	(1ULL << IOS_OBJECT_LATENCY)
+#define	IOS_OBJECT_ACTIVE_M	(1ULL << IOS_OBJECT_ACTIVE)
+#define	IOS_OBJECT_LAT_HISTO_M	(1ULL << IOS_OBJECT_LAT_HISTO)
+#define	IOS_OBJECT_REQ_HISTO_M	(1ULL << IOS_OBJECT_REQ_HISTO)
 
-#define	IOS_OBJECT_ANY_M	(IOS_OBJECT_STORE_M | IOS_OBJECT_LATENCY_M)
+#define	IOS_OBJECT_ANY_M ( \
+    IOS_OBJECT_STORE_M | \
+    IOS_OBJECT_LATENCY_M | \
+    IOS_OBJECT_ACTIVE_M | \
+    IOS_OBJECT_LAT_HISTO_M | \
+    IOS_OBJECT_REQ_HISTO_M)
 
 /* Mask of all the histo bits */
-#define	IOS_ANYHISTO_M (IOS_L_HISTO_M | IOS_RQ_HISTO_M)
+#define	IOS_ANYHISTO_M ( \
+    IOS_L_HISTO_M | IOS_RQ_HISTO_M | \
+    IOS_OBJECT_LAT_HISTO_M | IOS_OBJECT_REQ_HISTO_M)
 
 /*
  * Lookup table for iostat flags to nvlist names.  Basically a list
@@ -263,6 +276,21 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][15] = {
 	    ZPOOL_CONFIG_VDEV_AGG_TRIM_HISTO,
 	    ZPOOL_CONFIG_VDEV_IND_REBUILD_HISTO,
 	    ZPOOL_CONFIG_VDEV_AGG_REBUILD_HISTO,
+	    NULL},
+	[IOS_OBJECT_LAT_HISTO] = {
+	    ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
+	    ZPOOL_CONFIG_VDEV_TOT_W_LAT_HISTO,
+	    ZPOOL_CONFIG_VOS_GETS_LAT_HISTO,
+	    ZPOOL_CONFIG_VOS_PUTS_LAT_HISTO,
+	    ZPOOL_CONFIG_VOS_DELS_LAT_HISTO,
+	    NULL},
+	[IOS_OBJECT_REQ_HISTO] = {
+	    ZPOOL_CONFIG_VDEV_SYNC_IND_R_HISTO,
+	    ZPOOL_CONFIG_VDEV_SYNC_IND_W_HISTO,
+	    ZPOOL_CONFIG_VDEV_ASYNC_IND_R_HISTO,
+	    ZPOOL_CONFIG_VDEV_ASYNC_IND_W_HISTO,
+	    ZPOOL_CONFIG_VOS_GETS_REQ_HISTO,
+	    ZPOOL_CONFIG_VOS_PUTS_REQ_HISTO,
 	    NULL},
 };
 
@@ -383,7 +411,7 @@ get_usage(zpool_help_t idx)
 		    "[newpool]\n"));
 	case HELP_IOSTAT:
 		return (gettext("\tiostat [[[-c [script1,script2,...]"
-		    "[-lq]]|[-rw]] [-T d | u] [-ghHLpPvy]\n"
+		    "[-lq]]|[-rw]] [-T d | u] [-ghHLpPvy] [-o [-l|-q|-r|-w]]\n"
 		    "\t    [[pool ...]|[pool vdev ...]|[vdev ...]]"
 		    " [[-n] interval [count]]\n"));
 	case HELP_LABELCLEAR:
@@ -3942,7 +3970,7 @@ typedef struct name_and_columns {
 	unsigned int columns;	/* Center name to this number of columns */
 } name_and_columns_t;
 
-#define	IOSTAT_MAX_LABELS	20	/* Max number of labels on one line */
+#define	IOSTAT_MAX_LABELS	23	/* Max number of labels on one line */
 
 static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 {
@@ -3959,11 +3987,21 @@ static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_RQ_HISTO] = {{"sync_read", 2}, {"sync_write", 2},
 	    {"async_read", 2}, {"async_write", 2}, {"scrub", 2},
 	    {"trim", 2}, {"rebuild", 2}, {NULL}},
-	[IOS_OBJECT_STORE] = { {"operations", 2}, {"throughput", 2},
+	[IOS_OBJECT_STORE] = {{"operations", 2}, {"throughput", 2},
 	    {"operations", 2}, {"throughput", 2}, {"operations", 2},
-	    {"throughput", 2}, {"object", 1}, {NULL}},
-	[IOS_OBJECT_LATENCY] = {{"latency", 2}, {"operations", 2},
-	    {"throughput", 2}, {"latency", 2}, {NULL}},
+	    {"throughput", 2}, {"operations", 2}, {"throughput", 2},
+	    {"object", 1}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"operations", 2}, {"throughput", 2},
+	    {"latency", 2}, {"operations", 2}, {"throughput", 2},
+	    {"latency", 2}, {NULL}},
+	[IOS_OBJECT_ACTIVE] = { {"operations", 2}, {"throughput", 2},
+	    {"operations", 2}, {"throughput", 2}, {"active", 2},
+	    {"operations", 2}, {"throughput", 2}, {"active", 2},
+	    {"operations", 2}, {"throughput", 2}, {"active", 2}, {NULL}},
+	[IOS_OBJECT_LAT_HISTO] = {{"object_agent", 2}, {" object_store", 3},
+	    {NULL}},
+	[IOS_OBJECT_REQ_HISTO] = {{"synchronous", 2}, {"asynchronous", 2},
+	    {"object_store", 2}, {NULL}},
 };
 
 /* Shorthand - if "columns" field not set, default to 1 column */
@@ -3983,11 +4021,20 @@ static const name_and_columns_t iostat_bottom_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_RQ_HISTO] = {{"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
 	    {"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
 	    {"ind"}, {"agg"}, {NULL}},
-	[IOS_OBJECT_STORE] = {{"get"}, {"put"}, {"get"}, {"put"}, {"get"},
+	[IOS_OBJECT_STORE] = {{"read"}, {"write"}, {"read"}, {"write"}, {"get"},
 	    {"put"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"}, {"put"},
+	    {"get"}, {"put"}, {"get"}, {"put"}, {"del"}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"read"}, {"write"}, {"read"}, {"write"},
+	    {"read"}, {"write"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"},
+	    {"put"}, {NULL}},
+	[IOS_OBJECT_ACTIVE] = {{"read"}, {"write"}, {"read"}, {"write"},
+	    {"get"}, {"put"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"},
+	    {"put"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"}, {"put"},
+	    {"get"}, {"put"}, {"get"}, {"put"}, {NULL}},
+	[IOS_OBJECT_LAT_HISTO] = {{"read"}, {"write"}, {"get"}, {"put"},
 	    {"del"}, {NULL}},
-	[IOS_OBJECT_LATENCY] = {{"read"}, {"write"}, {"get"}, {"put"}, {"get"},
-	    {"put"}, {"get"}, {"put"}, {NULL}},
+	[IOS_OBJECT_REQ_HISTO] = {{"read"}, {"write"}, {"read"}, {"write"},
+	    {"get"}, {"put"}, {NULL}},
 };
 
 static const name_and_columns_t iostat_object_top_labels[][IOSTAT_MAX_LABELS] =
@@ -3997,17 +4044,25 @@ static const name_and_columns_t iostat_object_top_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_QUEUES] = {{NULL}},
 	[IOS_L_HISTO] = {{NULL}},
 	[IOS_RQ_HISTO] = {{NULL}},
-	[IOS_OBJECT_STORE] = {{"", 2}, {"object_agent_io", 4},
+	[IOS_OBJECT_STORE] = {{"object_agent_io", 4},
 	    {"object_store_data", 4}, {"object_store_metadata", 4},
 	    {"object_store_reclaim", 4}, {NULL}},
-	[IOS_OBJECT_LATENCY] = {{"", 2},
-	    {"---------- object_agent_total ----------", 6},
-	    {"---------- object_store_total ----------", 6}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"--------- object_agent_total ---------", 6},
+	    {"--------- object_store_total ---------", 6}, {NULL}},
+	[IOS_OBJECT_ACTIVE] = {
+	    {"--- object_agent_io ---", 4},
+	    {"---------- object_store_data ---------", 6},
+	    {"-------- object_store_metadata -------", 6},
+	    {"-------- object_store_reclaim --------", 6}, {NULL}},
+	[IOS_OBJECT_LAT_HISTO] = {{NULL}},
+	[IOS_OBJECT_REQ_HISTO] = {{NULL}},
 };
 
 static const char *histo_to_title[] = {
 	[IOS_L_HISTO] = "latency",
 	[IOS_RQ_HISTO] = "req_size",
+	[IOS_OBJECT_LAT_HISTO] = "latency",
+	[IOS_OBJECT_REQ_HISTO] = "req_size",
 };
 
 /*
@@ -4063,8 +4118,11 @@ default_column_width(iostat_cbdata_t *cb, enum iostat_type type)
 		[IOS_QUEUES] = 6,   /* 1M queue entries */
 		[IOS_L_HISTO] = 10, /* 1B ns = 10sec */
 		[IOS_RQ_HISTO] = 6, /* 1M queue entries */
-		[IOS_OBJECT_STORE] = 15, /* 1PB capacity */
+		[IOS_OBJECT_STORE] = 17, /* 512PB capacity */
 		[IOS_OBJECT_LATENCY] = 10, /* 1B ns = 10sec */
+		[IOS_OBJECT_ACTIVE] = 6,   /* 1M active entries */
+		[IOS_OBJECT_LAT_HISTO] = 10, /* 1B ns = 10sec */
+		[IOS_OBJECT_REQ_HISTO] = 6, /* 1M queue entries */
 	};
 
 	if (cb->cb_literal)
@@ -4100,15 +4158,6 @@ print_iostat_labels(iostat_cbdata_t *cb, unsigned int force_column_width,
 		/* Print our top labels centered over "read  write" label. */
 		for (i = 0; i < label_array_len(labels[idx]); i++) {
 			const char *name = labels[idx][i].name;
-
-			/*
-			 * When using default labels with object store stats
-			 * switch to using 'throughput' to match new stats.
-			 */
-			if (cb->cb_flags & IOS_OBJECT_ANY_M &&
-			    strcmp(name, "bandwidth") == 0) {
-				name = "throughput";
-			}
 
 			/*
 			 * We treat labels[][].columns == 0 as shorthand
@@ -4358,7 +4407,7 @@ print_one_stat_fractional(double value, enum zfs_nicenum_format format,
 	 * The operations values can be single digit and thay have been
 	 * scaled. Display values less than 9 as a float for more accuracy.
 	 */
-	if (format == ZFS_NICENUM_1024 && value != 0.0 && value < 9.0) {
+	if (format == ZFS_NICENUM_1024 && value > 0.005 && value < 9.0) {
 		if (scripted)
 			printf("\t%.2f", value);
 		else
@@ -4421,13 +4470,17 @@ stat_histo_max(struct stat_array *nva, unsigned int len)
  * it look like a one element array to make it easier to process.
  */
 static int
-nvpair64_to_stat_array(nvlist_t *nvl, const char *name,
+nvpair64_to_stat_array(nvlist_t *nvl, nvlist_t *altnvl, const char *name,
     struct stat_array *nva)
 {
 	nvpair_t *tmp;
 	int ret;
 
-	verify(nvlist_lookup_nvpair(nvl, name, &tmp) == 0);
+	if (altnvl != NULL && nvlist_exists(altnvl, name))
+		tmp = fnvlist_lookup_nvpair(altnvl, name);
+	else
+		tmp = fnvlist_lookup_nvpair(nvl, name);
+
 	switch (nvpair_type(tmp)) {
 	case DATA_TYPE_UINT64_ARRAY:
 		ret = nvpair_value_uint64_array(tmp, &nva->data, &nva->count);
@@ -4447,6 +4500,22 @@ nvpair64_to_stat_array(nvlist_t *nvl, const char *name,
 }
 
 /*
+ * When not displaying nanosec latency histogram buckets we fold them
+ * into the 1 usec bucket.
+ */
+static void
+stat_array_fold_ns(struct stat_array *nva)
+{
+	assert(nva->count == VDEV_L_HISTO_BUCKETS);
+
+	uint64_t nsec = 0;
+
+	for (int i = 0; i < 9; i++)
+		nsec += nva->data[i] * (2 << i);
+	nva->data[9] += MAX(nsec > 0 ? 1 : 0, nsec / 1000);
+}
+
+/*
  * Given a list of nvlist names, look up the extended stats in newnv and oldnv,
  * subtract them, and return the results in a newly allocated stat_array.
  * You must free the returned array after you are done with it with
@@ -4457,19 +4526,27 @@ nvpair64_to_stat_array(nvlist_t *nvl, const char *name,
  */
 static struct stat_array *
 calc_and_alloc_stats_ex(const char **names, unsigned int len, nvlist_t *oldnv,
-    nvlist_t *newnv)
+    nvlist_t *newnv, enum iostat_type type)
 {
 	nvlist_t *oldnvx = NULL, *newnvx;
+	nvlist_t *oldnvo = NULL, *newnvo = NULL;
 	struct stat_array *oldnva, *newnva, *calcnva;
 	int i, j;
 	unsigned int alloc_size = (sizeof (struct stat_array)) * len;
 
 	/* Extract our extended stats nvlist from the main list */
-	verify(nvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_VDEV_STATS_EX,
-	    &newnvx) == 0);
-	if (oldnv) {
-		verify(nvlist_lookup_nvlist(oldnv, ZPOOL_CONFIG_VDEV_STATS_EX,
-		    &oldnvx) == 0);
+	newnvx = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_VDEV_STATS_EX);
+	if (oldnv != NULL) {
+		oldnvx = fnvlist_lookup_nvlist(oldnv,
+		    ZPOOL_CONFIG_VDEV_STATS_EX);
+	}
+	if (type == IOS_OBJECT_LAT_HISTO || type == IOS_OBJECT_REQ_HISTO) {
+		newnvo = fnvlist_lookup_nvlist(newnv,
+		    ZPOOL_CONFIG_OBJECT_STORE_STATS);
+		if (oldnv != NULL) {
+			oldnvo = fnvlist_lookup_nvlist(oldnv,
+			    ZPOOL_CONFIG_OBJECT_STORE_STATS);
+		}
 	}
 
 	newnva = safe_malloc(alloc_size);
@@ -4477,7 +4554,7 @@ calc_and_alloc_stats_ex(const char **names, unsigned int len, nvlist_t *oldnv,
 	calcnva = safe_malloc(alloc_size);
 
 	for (j = 0; j < len; j++) {
-		verify(nvpair64_to_stat_array(newnvx, names[j],
+		verify(nvpair64_to_stat_array(newnvx, newnvo, names[j],
 		    &newnva[j]) == 0);
 		calcnva[j].count = newnva[j].count;
 		alloc_size = calcnva[j].count * sizeof (calcnva[j].data[0]);
@@ -4485,11 +4562,13 @@ calc_and_alloc_stats_ex(const char **names, unsigned int len, nvlist_t *oldnv,
 		memcpy(calcnva[j].data, newnva[j].data, alloc_size);
 
 		if (oldnvx) {
-			verify(nvpair64_to_stat_array(oldnvx, names[j],
+			verify(nvpair64_to_stat_array(oldnvx, oldnvo, names[j],
 			    &oldnva[j]) == 0);
 			for (i = 0; i < oldnva[j].count; i++)
 				calcnva[j].data[i] -= oldnva[j].data[i];
 		}
+		if (type == IOS_OBJECT_LAT_HISTO)
+			stat_array_fold_ns(&calcnva[j]);
 	}
 	free(newnva);
 	free(oldnva);
@@ -4529,13 +4608,19 @@ print_iostat_histo(struct stat_array *nva, unsigned int len,
 	if (cb->cb_flags & IOS_RQ_HISTO_M) {
 		/* Start at 512 - req size should never be lower than this */
 		start_bucket = 9;
+	} else if (cb->cb_flags & IOS_OBJECT_REQ_HISTO_M) {
+		/* Start at 64 bytes */
+		start_bucket = 6;
+	} else if (cb->cb_flags & IOS_OBJECT_LAT_HISTO_M) {
+		/* Omit nanosec buckects for object store latencies */
+		start_bucket = 9;
 	} else {
 		start_bucket = 0;
 	}
 
 	for (j = start_bucket; j < buckets; j++) {
 		/* Print histogram bucket label */
-		if (cb->cb_flags & IOS_L_HISTO_M) {
+		if (cb->cb_flags & (IOS_L_HISTO_M | IOS_OBJECT_LAT_HISTO_M)) {
 			/* Ending range of this bucket */
 			val = (1UL << (j + 1)) - 1;
 			zfs_nicetime(val, buf, sizeof (buf));
@@ -4586,7 +4671,7 @@ print_iostat_histos(iostat_cbdata_t *cb, nvlist_t *oldnv,
 	names = vsx_type_to_nvlist[type];
 	names_len = str_array_len(names); /* num of names */
 
-	nva = calc_and_alloc_stats_ex(names, names_len, oldnv, newnv);
+	nva = calc_and_alloc_stats_ex(names, names_len, oldnv, newnv, type);
 
 	if (cb->cb_literal) {
 		column_width = MAX(5,
@@ -4681,8 +4766,10 @@ print_iostat_queues(iostat_cbdata_t *cb, nvlist_t *oldnv,
 
 	unsigned int column_width = default_column_width(cb, IOS_QUEUES);
 	enum zfs_nicenum_format format;
+	enum iostat_type type = IOS_HISTO_IDX(cb->cb_flags);
+	unsigned int length = ARRAY_SIZE(names);
 
-	nva = calc_and_alloc_stats_ex(names, ARRAY_SIZE(names), NULL, newnv);
+	nva = calc_and_alloc_stats_ex(names, length, NULL, newnv, type);
 
 	if (cb->cb_literal)
 		format = ZFS_NICENUM_RAW;
@@ -4694,7 +4781,7 @@ print_iostat_queues(iostat_cbdata_t *cb, nvlist_t *oldnv,
 		print_one_stat(val, format, column_width, cb->cb_scripted);
 	}
 
-	free_calc_stats(nva, ARRAY_SIZE(names));
+	free_calc_stats(nva, length);
 }
 
 static void
@@ -4720,8 +4807,9 @@ print_iostat_latency(iostat_cbdata_t *cb, nvlist_t *oldnv,
 
 	unsigned int column_width = default_column_width(cb, IOS_LATENCY);
 	enum zfs_nicenum_format format;
+	unsigned int length = ARRAY_SIZE(names);
 
-	nva = calc_and_alloc_stats_ex(names, ARRAY_SIZE(names), oldnv, newnv);
+	nva = calc_and_alloc_stats_ex(names, length, oldnv, newnv, IOS_L_HISTO);
 
 	if (cb->cb_literal)
 		format = ZFS_NICENUM_RAWTIME;
@@ -4729,12 +4817,12 @@ print_iostat_latency(iostat_cbdata_t *cb, nvlist_t *oldnv,
 		format = ZFS_NICENUM_TIME;
 
 	/* Print our avg latencies on the line */
-	for (i = 0; i < ARRAY_SIZE(names); i++) {
+	for (i = 0; i < length; i++) {
 		/* Compute average latency for a latency histo */
 		val = single_histo_average(nva[i].data, nva[i].count);
 		print_one_stat(val, format, column_width, cb->cb_scripted);
 	}
-	free_calc_stats(nva, ARRAY_SIZE(names));
+	free_calc_stats(nva, length);
 }
 
 /*
@@ -4755,6 +4843,10 @@ print_iostat_default(vdev_stat_t *vs, iostat_cbdata_t *cb, double scale)
 		na = '-';
 	}
 
+	/* Object store iostats omit capacity */
+	if (cb->cb_flags & IOS_OBJECT_ANY_M)
+		goto after_capacity;
+
 	/* only toplevel vdevs have capacity stats */
 	if (vs->vs_space == 0) {
 		if (cb->cb_scripted)
@@ -4769,6 +4861,7 @@ print_iostat_default(vdev_stat_t *vs, iostat_cbdata_t *cb, double scale)
 		    column_width, cb->cb_scripted);
 	}
 
+after_capacity:
 	print_one_stat_fractional(vs->vs_ops[ZIO_TYPE_READ] * scale, format,
 	    column_width, cb->cb_scripted);
 	print_one_stat_fractional(vs->vs_ops[ZIO_TYPE_WRITE] * scale, format,
@@ -4803,8 +4896,13 @@ print_one_oss(nvlist_t *oldnv, nvlist_t *newnv, const char *type,
 	if (newval < oldval)
 		oldval = 0;
 
-	print_one_stat_fractional((newval - oldval) * scale, format, width,
-	    scripted);
+	/* Don't scale the active column values */
+	if (strcmp(stat, "active") == 0)
+		print_one_stat((uint64_t)(newval - oldval), format,
+		    width, scripted);
+	else
+		print_one_stat_fractional((newval - oldval) * scale, format,
+		    width, scripted);
 }
 
 static double
@@ -4815,7 +4913,8 @@ get_iostat_object_storage_scale(nvlist_t *oldnv, nvlist_t *newnv)
 	(void) nvlist_lookup_uint64(oldnv, "Timestamp", &oldtime);
 	(void) nvlist_lookup_uint64(newnv, "Timestamp", &newtime);
 	/*
-	 * If the object agent restarts then counters get reset. When that
+	 * The Timestamp here is nanosecs since the agent was started. If
+	 * the object agent restarts then timestamp gets reset. When that
 	 * occurs we can ignore the old value.
 	 */
 	if (newtime < oldtime)
@@ -4825,6 +4924,7 @@ get_iostat_object_storage_scale(nvlist_t *oldnv, nvlist_t *newnv)
 	return ((timedelta == 0) ? 1.0 :(double)NANOSEC / timedelta);
 }
 
+
 /*
  * Print object storage statistics
  */
@@ -4833,6 +4933,7 @@ print_iostat_object_storage(nvlist_t *oldnv, nvlist_t *newnv,
     iostat_cbdata_t *cb)
 {
 	nvlist_t *oldoss = NULL, *newoss;
+
 	newoss = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS);
 	if (oldnv == NULL ||
 	    nvlist_lookup_nvlist(oldnv, ZPOOL_CONFIG_OBJECT_STORE_STATS,
@@ -4846,41 +4947,53 @@ print_iostat_object_storage(nvlist_t *oldnv, nvlist_t *newnv,
 	print_one_oss(oldoss, newoss, "TxgSyncPut", "operations", cb, scale);
 	print_one_oss(oldoss, newoss, "ReadsGet", "total_bytes", cb, scale);
 	print_one_oss(oldoss, newoss, "TxgSyncPut", "total_bytes", cb, scale);
+	if (cb->cb_flags & IOS_OBJECT_ACTIVE_M) {
+		print_one_oss(oldoss, newoss, "ReadsGet", "active", cb, 1.0);
+		print_one_oss(oldoss, newoss, "TxgSyncPut", "active", cb, 1.0);
+	}
 
 	print_one_oss(oldoss, newoss, "MetadataGet", "operations", cb, scale);
 	print_one_oss(oldoss, newoss, "MetadataPut", "operations", cb, scale);
 	print_one_oss(oldoss, newoss, "MetadataGet", "total_bytes", cb, scale);
 	print_one_oss(oldoss, newoss, "MetadataPut", "total_bytes", cb, scale);
+	if (cb->cb_flags & IOS_OBJECT_ACTIVE_M) {
+		print_one_oss(oldoss, newoss, "MetadataGet", "active", cb, 1.0);
+		print_one_oss(oldoss, newoss, "MetadataPut", "active", cb, 1.0);
+	}
 
 	print_one_oss(oldoss, newoss, "ReclaimGet", "operations", cb, scale);
 	print_one_oss(oldoss, newoss, "ReclaimPut", "operations", cb, scale);
 	print_one_oss(oldoss, newoss, "ReclaimGet", "total_bytes", cb, scale);
 	print_one_oss(oldoss, newoss, "ReclaimPut", "total_bytes", cb, scale);
+	if (cb->cb_flags & IOS_OBJECT_ACTIVE_M) {
+		print_one_oss(oldoss, newoss, "ReclaimGet", "active", cb, 1.0);
+		print_one_oss(oldoss, newoss, "ReclaimPut", "active", cb, 1.0);
+	}
 
-	print_one_oss(oldoss, newoss, "ObjectDelete", "operations", cb, scale);
+	if (cb->cb_flags & IOS_OBJECT_STORE_M) {
+		print_one_oss(oldoss, newoss, "ObjectDelete", "operations",
+		    cb, scale);
+	}
 }
 
 static void
-print_object_agent_latency(nvlist_t *oldnv, nvlist_t *newnv,
-    iostat_cbdata_t *cb)
+print_object_agent_latency(const char **names, unsigned int length,
+    nvlist_t *oldnv, nvlist_t *newnv, iostat_cbdata_t *cb,
+    enum iostat_type type)
 {
-	const char *names[] = {
-		ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
-		ZPOOL_CONFIG_VDEV_TOT_W_LAT_HISTO,
-	};
 	unsigned int width = default_column_width(cb, IOS_LATENCY);
 	enum zfs_nicenum_format format = cb->cb_literal ?
 	    ZFS_NICENUM_RAWTIME : ZFS_NICENUM_TIME;
 
 	struct stat_array *nva =
-	    calc_and_alloc_stats_ex(names, ARRAY_SIZE(names), oldnv, newnv);
+	    calc_and_alloc_stats_ex(names, length, oldnv, newnv, type);
 
 	/* Print average latencies on the line */
-	for (int i = 0; i < ARRAY_SIZE(names); i++) {
+	for (int i = 0; i < length; i++) {
 		uint64_t val = single_histo_average(nva[i].data, nva[i].count);
 		print_one_stat(val, format, width, cb->cb_scripted);
 	}
-	free_calc_stats(nva, ARRAY_SIZE(names));
+	free_calc_stats(nva, length);
 }
 
 static void
@@ -4889,27 +5002,31 @@ print_iostat_object_latency(nvlist_t *oldnv, nvlist_t *newnv,
 {
 	nvlist_t *oldoss = NULL, *newoss;
 	newoss = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS);
-	if (oldnv == NULL ||
-	    nvlist_lookup_nvlist(oldnv, ZPOOL_CONFIG_OBJECT_STORE_STATS,
-	    &oldoss) != 0) {
-		oldoss = fnvlist_alloc();
+	if (oldnv != NULL) {
+		oldoss = fnvlist_lookup_nvlist(oldnv,
+		    ZPOOL_CONFIG_OBJECT_STORE_STATS);
 	}
+
+	/* print round-trip latency from object agent (uses zio->io_delay) */
+	const char *names[] = {
+		ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
+		ZPOOL_CONFIG_VDEV_TOT_W_LAT_HISTO,
+	};
+	print_object_agent_latency(names, ARRAY_SIZE(names), oldnv, newnv,
+	    cb, IOS_L_HISTO);
+
 	double scale = get_iostat_object_storage_scale(oldoss, newoss);
-
-	/*  print round-trip latency from object agent (uses zio->io_delay) */
-	print_object_agent_latency(oldnv, newnv, cb);
-
 	print_one_oss(oldoss, newoss, "TotalGet", "operations", cb, scale);
 	print_one_oss(oldoss, newoss, "TotalPut", "operations", cb, scale);
 	print_one_oss(oldoss, newoss, "TotalGet", "total_bytes", cb, scale);
 	print_one_oss(oldoss, newoss, "TotalPut", "total_bytes", cb, scale);
 
-	/* TODO - this can be based from latency histogram when it's avail */
-	unsigned int width = default_column_width(cb, IOS_OBJECT_LATENCY);
-	if (cb->cb_scripted)
-		printf("\t-\t-");
-	else
-		printf("  %*c  %*c", width, '-', width, '-');
+	const char *onames[] = {
+		"LatencyHistogramGets",
+		"LatencyHistogramPuts",
+	};
+	print_object_agent_latency(onames, ARRAY_SIZE(onames), oldnv, newnv,
+	    cb, IOS_OBJECT_LAT_HISTO);
 }
 
 static const char *class_name[] = {
@@ -5007,14 +5124,21 @@ print_vdev_stats(zpool_handle_t *zhp, const char *name, nvlist_t *oldnv,
 			scale = (double)NANOSEC / tdelta;
 	}
 
-	if (cb->cb_flags & IOS_DEFAULT_M) {
+	/* When not asking for histograms, we need to generate the calcvs */
+	if ((cb->cb_flags & IOS_ANYHISTO_M) == 0)
 		calc_default_iostats(oldvs, newvs, calcvs);
+
+	if (cb->cb_flags & IOS_DEFAULT_M)
 		print_iostat_default(calcvs, cb, scale);
-	}
-	if (cb->cb_flags & IOS_OBJECT_STORE_M)
+
+	if (cb->cb_flags & (IOS_OBJECT_STORE_M | IOS_OBJECT_ACTIVE_M)) {
+		print_iostat_default(calcvs, cb, scale);
 		print_iostat_object_storage(oldnv, newnv, cb);
-	else if (cb->cb_flags & IOS_OBJECT_LATENCY_M)
+	} else if (cb->cb_flags & IOS_OBJECT_LATENCY_M) {
+		print_iostat_default(calcvs, cb, scale);
 		print_iostat_object_latency(oldnv, newnv, cb);
+	}
+
 	if (cb->cb_flags & IOS_LATENCY_M)
 		print_iostat_latency(cb, oldnv, newnv);
 	if (cb->cb_flags & IOS_QUEUES_M)
@@ -5353,7 +5477,7 @@ static int
 get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 {
 	uint64_t *mask = data;
-	nvlist_t *config, *nvroot, *nvx;
+	nvlist_t *config, *nvroot, *nvx, *nvo = NULL;
 	uint64_t flags = 0;
 	int i, j;
 
@@ -5365,8 +5489,11 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 	if (nvlist_exists(nvroot, ZPOOL_CONFIG_VDEV_STATS))
 		flags |= IOS_DEFAULT_M;
 
-	if (nvlist_exists(nvroot, ZPOOL_CONFIG_OBJECT_STORE_STATS))
+	/* Check if Object Store stats are present */
+	if (nvlist_lookup_nvlist(nvroot, ZPOOL_CONFIG_OBJECT_STORE_STATS,
+	    &nvo) == 0) {
 		flags |= IOS_OBJECT_ANY_M;
+	}
 
 	/* Get our extended stats nvlist from the main list */
 	if (nvlist_lookup_nvlist(nvroot, ZPOOL_CONFIG_VDEV_STATS_EX,
@@ -5386,7 +5513,9 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 		/* Start off by assuming the flag is supported, then check */
 		flags |= (1ULL << j);
 		for (i = 0; vsx_type_to_nvlist[j][i]; i++) {
-			if (!nvlist_exists(nvx, vsx_type_to_nvlist[j][i])) {
+			const char *nv_name = vsx_type_to_nvlist[j][i];
+			if (!nvlist_exists(nvx, nv_name) && nvo != NULL &&
+			    !nvlist_exists(nvo, nv_name)) {
 				/* flag isn't supported */
 				flags = flags & ~(1ULL  << j);
 				break;
@@ -5796,9 +5925,17 @@ zpool_do_iostat(int argc, char **argv)
 	char *cmd = NULL;
 
 	/* Used for printing error message */
-	const char flag_to_arg[] = {[IOS_LATENCY] = 'l', [IOS_QUEUES] = 'q',
-	    [IOS_L_HISTO] = 'w', [IOS_RQ_HISTO] = 'r', [IOS_OBJECT_STORE] = 'o',
-	    [IOS_OBJECT_LATENCY] = 'o'};
+	const char *flag_to_arg[] = {
+	    [IOS_LATENCY] = "l",
+	    [IOS_QUEUES] = "q",
+	    [IOS_L_HISTO] = "w",
+	    [IOS_RQ_HISTO] = "r",
+	    [IOS_OBJECT_STORE] = "o",
+	    [IOS_OBJECT_LATENCY] = "ol",
+	    [IOS_OBJECT_ACTIVE] = "oq",
+	    [IOS_OBJECT_LAT_HISTO] = "ow",
+	    [IOS_OBJECT_REQ_HISTO] = "or"
+	};
 
 	uint64_t unsupported_flags;
 
@@ -5994,7 +6131,18 @@ zpool_do_iostat(int argc, char **argv)
 	 */
 	cb.cb_list = list;
 
-	if (l_histo) {
+	if (object_store) {
+		if (latency)
+			cb.cb_flags = IOS_OBJECT_LATENCY_M;
+		else if (queues)
+			cb.cb_flags = IOS_OBJECT_ACTIVE_M;
+		else if (l_histo)
+			cb.cb_flags = IOS_OBJECT_LAT_HISTO_M;
+		else if (rq_histo)
+			cb.cb_flags = IOS_OBJECT_REQ_HISTO_M;
+		else
+			cb.cb_flags =  IOS_OBJECT_STORE_M;
+	} else if (l_histo) {
 		/*
 		 * Histograms tables look out of place when you try to display
 		 * them with the other stats, so make a rule that you can only
@@ -6003,10 +6151,6 @@ zpool_do_iostat(int argc, char **argv)
 		cb.cb_flags = IOS_L_HISTO_M;
 	} else if (rq_histo) {
 		cb.cb_flags = IOS_RQ_HISTO_M;
-	} else if (object_store) {
-		cb.cb_flags = IOS_DEFAULT_M;
-		cb.cb_flags |= latency ? IOS_OBJECT_LATENCY_M :
-		    IOS_OBJECT_STORE_M;
 	} else {
 		cb.cb_flags = IOS_DEFAULT_M;
 		if (latency)
@@ -6034,7 +6178,7 @@ zpool_do_iostat(int argc, char **argv)
 		/* for each bit set in unsupported_flags */
 		for (f = unsupported_flags; f; f &= ~(1ULL << idx)) {
 			idx = lowbit64(f) - 1;
-			fprintf(stderr, " -%c", flag_to_arg[idx]);
+			fprintf(stderr, " -%s", flag_to_arg[idx]);
 		}
 
 		if ((cb.cb_flags & IOS_OBJECT_ANY_M) == 0)

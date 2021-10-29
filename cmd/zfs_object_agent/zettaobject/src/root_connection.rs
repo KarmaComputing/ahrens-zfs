@@ -1,6 +1,6 @@
 use crate::base_types::*;
 use crate::features::FeatureError;
-use crate::object_access::ObjectAccess;
+use crate::object_access::{ObjectAccess, StatMapValue};
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::handler_return_ok;
@@ -389,18 +389,26 @@ impl RootConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
 
-        // build an nvlist from the stats hash map
-        let (stats, timestamp) = pool.state.shared_state.object_access.collect_stats();
+        //
+        // Build an nvlist from the stats hash map
+        // Each map entry can be a Counter, a CounterMap, or a Histogram
+        //
+        let stats = pool.state.shared_state.object_access.collect_stats();
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("Timestamp", &timestamp).unwrap();
-        for (stat_type, stat_map) in stats.iter() {
-            let mut contents = NvList::new_unique_names();
-            for (key, value) in stat_map.iter() {
-                // e.g. "operations": 459
-                contents.insert(key, value).unwrap();
+        for (name, stat_value) in stats.iter() {
+            match stat_value {
+                StatMapValue::Counter(timestamp) => nvl.insert(name, timestamp).unwrap(),
+                StatMapValue::CounterMap(cm) => {
+                    let mut contents = NvList::new_unique_names();
+                    for (key, value) in cm.iter() {
+                        // e.g. "operations": 459
+                        contents.insert(key, value).unwrap();
+                    }
+                    // e.g. "MetadataPut": {"operations": 459, "total_bytes": 350280, "active": 2}
+                    nvl.insert(name, contents.as_ref()).unwrap();
+                }
+                StatMapValue::Histogram(histogram) => nvl.insert(name, &histogram[..]).unwrap(),
             }
-            // e.g. "MetadataPut": {"operations": 459, "total_bytes": 350280}
-            nvl.insert(stat_type, contents.as_ref()).unwrap();
         }
 
         let mut response = NvList::new_unique_names();

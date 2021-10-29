@@ -696,6 +696,15 @@ typedef struct zpool_load_policy {
 /* container nvlist of object store backend  stats */
 #define	ZPOOL_CONFIG_OBJECT_STORE_STATS		"object_store_stats"
 
+/* Object Store VDEV latency histogram stats */
+#define	ZPOOL_CONFIG_VOS_GETS_LAT_HISTO		"LatencyHistogramGets"
+#define	ZPOOL_CONFIG_VOS_PUTS_LAT_HISTO		"LatencyHistogramPuts"
+#define	ZPOOL_CONFIG_VOS_DELS_LAT_HISTO		"LatencyHistogramDeletes"
+
+/* Object Store VDEV request size histograms */
+#define	ZPOOL_CONFIG_VOS_GETS_REQ_HISTO		"RequestHistogramGets"
+#define	ZPOOL_CONFIG_VOS_PUTS_REQ_HISTO		"RequestHistogramPuts"
+
 /* vdev enclosure sysfs path */
 #define	ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH	"vdev_enc_sysfs_path"
 

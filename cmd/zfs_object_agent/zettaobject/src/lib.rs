@@ -8,7 +8,6 @@ mod data_object;
 mod features;
 mod heartbeat;
 pub mod init;
-pub use object_access::{OAError, ObjectAccessStatType};
 mod object_access;
 mod object_based_log;
 mod object_block_map;
@@ -18,5 +17,5 @@ mod public_connection;
 mod root_connection;
 mod server;
 
-pub use object_access::ObjectAccess;
+pub use object_access::{ObjectAccess, ObjectAccessStatType, StatMapValue};
 pub use pool::Pool;
