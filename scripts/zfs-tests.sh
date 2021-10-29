@@ -56,6 +56,8 @@ HAS_ZOA_SERVICE="$(systemctl list-unit-files 2>/dev/null | \
     awk '/^zfs-object-agent/ {found=1}
     END{if(found) print "true"; else print "false"}')"
 
+ZOA_TUNABLE_LIST="die_mtbf_secs die_file"
+ZOA_DIE_MTBF_SECS_DEFAULT_VALUE="150"
 # Override some defaults if on FreeBSD
 if [ "$UNAME" = "FreeBSD" ] ; then
 	TESTFAIL_CALLBACKS=${TESTFAIL_CALLBACKS:-"$ZFS_DMESG"}
@@ -380,6 +382,97 @@ get_cache_part() {
 	echo "/dev/disk/by-id/$cache_part"
 }
 
+
+# Add a tunable with name and value in the
+# /etc/zfs/zoa_config.toml
+add_tunable() {
+    name="$1"
+    value="$2"
+    echo "$name=$value" | sudo tee -a $ZOA_CONFIG > /dev/null
+}
+
+# Returns if a tunable is already configured
+# in the zoa configuration file
+is_tunable_configured() {
+    grep "$1" $ZOA_CONFIG 1>/dev/null 2>&1
+    return $?
+}
+
+# Adds or updates a tunable into the /etc/zfs/zoa_config.toml
+add_or_update_tunable() {
+    name="$1"
+    value="$2"
+
+    if is_tunable_configured "$name"; then
+        # sed -E enables extended regexp
+
+        # Anything that has 0 or more whitespace
+        # followed by keyword identified by $name
+        # followed by 0 or more white spaces
+        # followed by a =
+        # followed by 0 or more white spaces
+        # followed by group that captures anything
+        sudo -E \
+            sed -E -i "s/\s*${name}\s*=\s*(.*)/${name}=${value}/" $ZOA_CONFIG
+    else
+        add_tunable "$name" "$value"
+    fi
+}
+
+# Returns if the tunable is in allowed list
+is_tunable_allowed() {
+    tunable_name="$1"
+    for tunable in $ZOA_TUNABLE_LIST; do
+        if [ "$tunable" = "$tunable_name" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Checks and sets the ZOA tunables in
+# the /etc/zfs/zoa_config.toml
+check_and_set_zoa_tunables() {
+    # A tunable can be defined using the environment
+    # variable in following format
+    # ZTS_ZOA_TUNABLE_<TUNABLE_NAME>=<TUNABLE_VALUE>
+
+    # As a convention any environment variable prefixed
+    # with ZTS_ZOA_TUNABLE_ would be considered as a
+    # valid tunable and shall be added to the /etc/zfs/zoa_config.toml
+    # only if the tunable is allowed
+
+    # Loop through all environment variables that begins
+    # with ZTS_ZOA_TUNABLE_ in a sorted form
+    for zoa_tunable in $(env | grep "ZTS_ZOA_TUNABLE_" | sort | xargs); do
+        # Chop the prefix
+        tunable=${zoa_tunable#ZTS_ZOA_TUNABLE_}
+
+        # Convert the tunable to its lowercase format
+        # A tunable name is the first field separated
+        # by a "="
+        tunable_name=$(echo "$tunable" | cut -d "=" -f1 |\
+            tr "[:upper:]" "[:lower:]")
+
+        # Tunable value is the second field separated
+        # by a "="
+        tunable_value=$(echo "$tunable" | cut -d "=" -f2)
+
+        if is_tunable_allowed "$tunable_name"; then
+            add_or_update_tunable "$tunable_name" "$tunable_value"
+        else
+            msg "Skipping zoa tunable $tunable_name as it is not" \
+                "in the allowed list of tunables"
+        fi
+    done
+    # Finally if the variable ZTS_ZOA_TUNABLE_DIE_MTBF_SECS is not
+    # set in the environment variable then add a default
+    # one to the config
+    if ! is_tunable_configured "die_mtbf_secs"; then
+        add_tunable "die_mtbf_secs" $ZOA_DIE_MTBF_SECS_DEFAULT_VALUE
+    fi
+}
+
 while getopts 'hvqxkfScn:d:s:r:?t:T:u:I:' OPTION; do
 	case $OPTION in
 	h)
@@ -637,6 +730,12 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 		    $ZOA_CONF
 	fi
 
+	# Enable zfs-object-agent to automatically
+	# kill itself with the tunables set
+	if [ -n "$ZTS_KILL_ZOA" ]; then
+		check_and_set_zoa_tunables
+	fi
+
 	#
 	# Start zfs_object_agent using the service if available, otherwise
 	# start it manually.
@@ -748,6 +847,7 @@ msg "Missing util(s): $STF_MISSING_BIN"
 msg "ZTS_OBJECT_STORE:      $ZTS_OBJECT_STORE"
 msg "ZETTACACHE_DEVICE:     $ZETTACACHE_DEVICE"
 msg "RUST_BACKTRACE:        $RUST_BACKTRACE"
+msg "ZTS_KILL_ZOA:          $ZTS_KILL_ZOA"
 msg ""
 
 export STF_TOOLS
