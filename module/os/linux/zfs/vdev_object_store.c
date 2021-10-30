@@ -56,6 +56,7 @@ struct sockaddr_un zfs_root_socket = {
 int vdev_object_store_max_frees = 100000;
 
 typedef enum {
+	VOS_SOCK_UNINITIALIZED = 0,
 	VOS_SOCK_CLOSED = (1 << 0),
 	VOS_SOCK_SHUTTING_DOWN = (1 << 1),
 	VOS_SOCK_SHUTDOWN = (1 << 2),
@@ -1014,6 +1015,22 @@ vdev_object_store_stats_generate(vdev_t *vd, nvlist_t *nv)
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	object_store_stats_call_t stats_call;
 
+	/*
+	 * We need to ensure that we only issue a request when the
+	 * socket is ready. Otherwise, we block here since the agent
+	 * might be in recovery.
+	 *
+	 * When the socket is uninitialized or closed, it could be a failed
+	 * open/import, in which case there is no need to collect stats and
+	 * we may never reach the READY state.
+	 */
+	mutex_enter(&vos->vos_sock_lock);
+	if (vos->vos_sock_state < VOS_SOCK_OPENING) {
+		mutex_exit(&vos->vos_sock_lock);
+		return;
+	}
+	zfs_object_store_wait(vos, VOS_SOCK_READY);
+
 	stats_call.oss_nvl = NULL;
 	stats_call.oss_owner = (uint64_t)curthread;
 	mutex_init(&stats_call.oss_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -1031,14 +1048,6 @@ vdev_object_store_stats_generate(vdev_t *vd, nvlist_t *nv)
 		zfs_dbgmsg("vdev_object_store_stats_generate(guid=%llu)",
 		    (u_longlong_t)spa_guid(vd->vdev_spa));
 	}
-
-	/*
-	 * We need to ensure that we only issue a request when the
-	 * socket is ready. Otherwise, we block here since the agent
-	 * might be in recovery.
-	 */
-	mutex_enter(&vos->vos_sock_lock);
-	zfs_object_store_wait(vos, VOS_SOCK_READY);
 
 	agent_request(vos, request, FTAG);
 	mutex_exit(&vos->vos_sock_lock);
@@ -1735,7 +1744,7 @@ vdev_object_store_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 		    vos->vos_cred_profile);
 	}
 
-	if (getstats)
+	if (getstats && spa_load_state(vd->vdev_spa) == SPA_LOAD_NONE)
 		vdev_object_store_stats_generate(vd, nv);
 }
 
