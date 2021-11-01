@@ -91,7 +91,7 @@ lazy_static! {
     // when log is 5x as large as the condensed version
     static ref LOG_CONDENSE_MULTIPLE: usize = get_tunable("log_condense_multiple", 5);
 
-    static ref CLAIM_DURATION: Duration = Duration::from_secs(get_tunable("claim_duration_secs", 2));
+    pub static ref CLAIM_DURATION: Duration = Duration::from_secs(get_tunable("claim_duration_secs", 2));
 
     // By default, retain metadata for as long as we would return Uberblocks in a block-based pool
     static ref METADATA_RETENTION_TXGS: u64 = get_tunable("metadata_retention_txgs", 128);
@@ -400,7 +400,7 @@ pub struct PoolState {
     zettacache: Option<ZettaCache>,
     pub shared_state: Arc<PoolSharedState>,
     resuming: watch::Receiver<bool>,
-    _heartbeat_guard: Option<HeartbeatGuard>, // Used for RAII
+    heartbeat_guard: Option<HeartbeatGuard>,
 }
 
 /// runtime data for each pair of pending frees + object sizes logs
@@ -905,7 +905,7 @@ impl Pool {
                 zettacache: cache,
                 object_block_map,
                 resuming: rx,
-                _heartbeat_guard: heartbeat_guard,
+                heartbeat_guard,
             }),
         };
 
@@ -999,7 +999,7 @@ impl Pool {
                     zettacache: cache,
                     object_block_map,
                     resuming: rx,
-                    _heartbeat_guard: if !shared_state.object_access.readonly() {
+                    heartbeat_guard: if !shared_state.object_access.readonly() {
                         Some(
                             heartbeat::start_heartbeat(shared_state.object_access.clone(), id)
                                 .await,
@@ -1780,14 +1780,21 @@ impl Pool {
         let mut duration = Instant::now().duration_since(start);
         if let Ok(owner) = owner_res {
             info!("Owner found: {:?}", owner);
+            if owner.owner == id {
+                info!("Self owner found");
+                if let Some(valid_after) = self.state.heartbeat_guard.as_ref().unwrap().valid_after
+                {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(
+                        valid_after.checked_add(*CLAIM_DURATION * 3).unwrap(),
+                    ))
+                    .await;
+                }
+                return handle_final_owner(object_access, guid, id).await;
+            }
             let heartbeat_res = HeartbeatPhys::get(object_access, owner.owner).await;
             duration = Instant::now().duration_since(start);
             if let Ok(heartbeat) = heartbeat_res {
                 info!("Heartbeat found: {:?}", heartbeat);
-                if owner.owner == id {
-                    info!("Self heartbeat found");
-                    return OwnResult::Success;
-                }
                 /*
                  * We do this twice, because in the normal case we'll find an updated heartbeat within
                  * a couple seconds. In the case where there are unexpected s3 failures or network
@@ -1839,20 +1846,7 @@ impl Pool {
         }
         sleep(*CLAIM_DURATION * 3).await;
 
-        let final_owner = PoolOwnerPhys::get(object_access, guid).await.unwrap();
-        if final_owner.owner != id {
-            return OwnResult::Failure(
-                HeartbeatPhys::get(object_access, final_owner.owner)
-                    .await
-                    .unwrap_or(HeartbeatPhys {
-                        timestamp: SystemTime::now(),
-                        hostname: "unknown".to_string(),
-                        lease_duration: *LEASE_DURATION,
-                        id: final_owner.owner,
-                    }),
-            );
-        }
-        OwnResult::Success
+        return handle_final_owner(object_access, guid, id).await;
     }
 
     pub async fn claim(&mut self, id: Uuid) -> Result<(), PoolOpenError> {
@@ -1915,6 +1909,27 @@ impl Pool {
             }
         });
     }
+}
+
+async fn handle_final_owner(
+    object_access: &Arc<ObjectAccess>,
+    guid: PoolGuid,
+    expected: Uuid,
+) -> OwnResult {
+    let final_owner = PoolOwnerPhys::get(object_access, guid).await.unwrap();
+    if final_owner.owner != expected {
+        return OwnResult::Failure(
+            HeartbeatPhys::get(object_access, final_owner.owner)
+                .await
+                .unwrap_or(HeartbeatPhys {
+                    timestamp: SystemTime::now(),
+                    hostname: "unknown".to_string(),
+                    lease_duration: *LEASE_DURATION,
+                    id: final_owner.owner,
+                }),
+        );
+    }
+    OwnResult::Success
 }
 
 //

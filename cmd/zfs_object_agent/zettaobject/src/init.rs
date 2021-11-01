@@ -9,10 +9,12 @@ use log4rs::append::file::FileAppender;
 use log4rs::config::Logger;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::mem;
+use std::path::Path;
 use std::process;
+use uuid::Uuid;
 use zettacache::ZettaCache;
 
 lazy_static! {
@@ -139,6 +141,17 @@ fn lock_socket_dir(socket_dir: &str) {
     }
 }
 
+fn parse_id_from_file(id_path: &Path) -> Result<Uuid, anyhow::Error> {
+    let mut f = File::open(id_path)?;
+
+    let mut bytes = Vec::new();
+    assert_eq!(
+        f.read_to_end(&mut bytes)?,
+        uuid::adapter::Hyphenated::LENGTH,
+    );
+    Ok(Uuid::parse_str(std::str::from_utf8(&bytes)?)?)
+}
+
 pub fn start(socket_dir: &str, cache_path: Option<&str>) {
     /*
      * Take an exclusive lock on a lock file. This prevents multiple agent
@@ -162,7 +175,19 @@ pub fn start(socket_dir: &str, cache_path: Option<&str>) {
                 None => None,
             };
 
-            RootServerState::start(socket_dir, cache);
+            let id_path = Path::new("/run/zfs_agent_id");
+
+            let id = parse_id_from_file(id_path).unwrap_or_else(|err| {
+                trace!("Opening agent id failed: {:?}", err);
+                let mut file = File::create(id_path).unwrap();
+                let uuid = Uuid::new_v4();
+                let mut buf = [0; uuid::adapter::Hyphenated::LENGTH];
+                uuid.to_hyphenated().encode_lower(&mut buf);
+                file.write_all(&buf).unwrap();
+                uuid
+            });
+
+            RootServerState::start(socket_dir, cache, id);
 
             // keep the process from exiting
             let () = futures::future::pending().await;

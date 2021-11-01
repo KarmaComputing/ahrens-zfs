@@ -1,10 +1,11 @@
 use crate::object_access::{OAError, ObjectAccess, ObjectAccessStatType};
+use crate::pool::CLAIM_DURATION;
 use anyhow::Context;
 use lazy_static::lazy_static;
 use log::{debug, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     sync::{Arc, Weak},
     time::{Duration, Instant, SystemTime},
 };
@@ -77,12 +78,21 @@ struct HeartbeatImpl {
 }
 pub struct HeartbeatGuard {
     _key: Arc<()>,
+    /*
+     * When we're resuming the agent after a crash, this field will be set if we go more than
+     * LEASE_TIMEOUT without sending a heartbeat. When the agent's heartbeat stops for more than
+     * that time, other systems may start the claim process on pools owned by this agent. When the
+     * heartbeat restarts after the agent starts again, new claim attempts that come in will fail,
+     * but in progress ones may succeed. We don't consider the news about the agent's revival fully
+     * propogated until the valid_time.
+     */
+    pub valid_after: Option<Instant>,
 }
-
+type ConcurrentMap<T, S> = Arc<std::sync::Mutex<HashMap<T, S>>>;
 lazy_static! {
-    static ref HEARTBEAT: Arc<std::sync::Mutex<HashMap<HeartbeatImpl, Weak<()>>>> =
+    static ref HEARTBEATS: ConcurrentMap<HeartbeatImpl, (Weak<()>, Option<Instant>)> =
         Default::default();
-    static ref HEARTBEAT_INIT: Arc<std::sync::Mutex<HashMap<HeartbeatImpl, Receiver<bool>>>> =
+    static ref HEARTBEAT_INIT: ConcurrentMap<HeartbeatImpl, Receiver<Option<Instant>>> =
         Default::default();
 }
 
@@ -92,20 +102,37 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
         region: object_access.region(),
         bucket: object_access.bucket(),
     };
-    let (guard, tx_opt, rx_opt, found) = {
-        let mut heartbeats = HEARTBEAT.lock().unwrap();
+    let hiccup = HeartbeatPhys::get(&object_access, id)
+        .await
+        .map_or(false, |heartbeat_phys| {
+            SystemTime::now()
+                .duration_since(heartbeat_phys.timestamp)
+                .map_or(true, |d| d > *LEASE_DURATION)
+        });
+    let (mut guard, tx_opt, rx_opt, found) = {
+        let mut heartbeats = HEARTBEATS.lock().unwrap();
         match heartbeats.get(&key) {
             None => {
                 let value = Arc::new(());
-                heartbeats.insert(key.clone(), Arc::downgrade(&value));
-                let (tx, rx) = watch::channel(false);
+                // We will update this hiccup time once we've managed to write our first heartbeat.
+                heartbeats.insert(key.clone(), (Arc::downgrade(&value), None));
+                let (tx, rx) = watch::channel(None);
                 HEARTBEAT_INIT
                     .lock()
                     .unwrap()
                     .insert(key.clone(), rx.clone());
-                (HeartbeatGuard { _key: value }, Some(tx), Some(rx), false)
+                (
+                    // We will update this hiccup time once we've managed to write our first heartbeat.
+                    HeartbeatGuard {
+                        _key: value,
+                        valid_after: None,
+                    },
+                    Some(tx),
+                    Some(rx),
+                    false,
+                )
             }
-            Some(val_ref) => {
+            Some((val_ref, hiccup_time)) => {
                 debug!("existing entry found");
                 match val_ref.upgrade() {
                     None => {
@@ -115,15 +142,25 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
                          * let it keep running.
                          */
                         let value = Arc::new(());
-                        heartbeats.insert(key.clone(), Arc::downgrade(&value));
-                        return HeartbeatGuard { _key: value };
+                        let time = *hiccup_time;
+                        heartbeats.insert(key.clone(), (Arc::downgrade(&value), time));
+                        return HeartbeatGuard {
+                            _key: value,
+                            valid_after: time,
+                        };
                     }
                     /*
                      * We have to process this outside of the block so that the compiler
                      * realizes the mutex is dropped across the await.
+                     * We also will reset the hiccup time if there's an rx in HEARTBEAT_INIT,
+                     * because the value in the HEARTBEATS table isn't accurate until the first
+                     * heartbeat has been synced out.
                      */
                     Some(val) => (
-                        HeartbeatGuard { _key: val },
+                        HeartbeatGuard {
+                            _key: val,
+                            valid_after: *hiccup_time,
+                        },
                         None,
                         HEARTBEAT_INIT
                             .lock()
@@ -143,8 +180,8 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
          */
         debug!("upgrade succeeded, using existing heartbeat");
         if let Some(mut rx) = rx_opt {
-            let result = rx.changed().await;
-            assert!(result.is_err() || *rx.borrow());
+            rx.changed().await.unwrap();
+            guard.valid_after = *rx.borrow();
         }
         return guard;
     }
@@ -166,9 +203,9 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
             }
             {
                 let fut_opt = {
-                    let mut heartbeats = HEARTBEAT.lock().unwrap();
+                    let mut heartbeats = HEARTBEATS.lock().unwrap();
                     // We can almost use or_else here, but that doesn't let us change types.
-                    match heartbeats.get(&key).unwrap().upgrade() {
+                    match heartbeats.get(&key).unwrap().0.upgrade() {
                         None => {
                             heartbeats.remove(&key);
                             info!("Stopping heartbeat with id {}", id);
@@ -203,14 +240,27 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
             }
             if result.is_ok() {
                 if last_heartbeat.is_none() {
-                    tx.send(true).unwrap();
+                    if hiccup {
+                        let mut heartbeats = HEARTBEATS.lock().unwrap();
+                        let time = Instant::now() + (*CLAIM_DURATION * 3);
+                        if let Entry::Occupied(mut oe) = heartbeats.entry(key.clone()) {
+                            oe.get_mut().1 = Some(time);
+                        } else {
+                            panic!("key {:?} not in heartbeats", key);
+                        }
+                        assert!(HEARTBEAT_INIT.lock().unwrap().remove(&key).is_some());
+                        tx.send(Some(time)).unwrap();
+                    } else {
+                        assert!(HEARTBEAT_INIT.lock().unwrap().remove(&key).is_some());
+                        tx.send(None).unwrap();
+                    }
                 }
                 last_heartbeat = Some(instant);
             }
         }
     });
-    let result = rx.changed().await;
-    assert!(result.is_err() || *rx.borrow());
+    rx.changed().await.unwrap();
+    guard.valid_after = *rx.borrow();
     guard
 }
 

@@ -47,15 +47,12 @@ impl RootServerState {
         }
     }
 
-    pub fn start(socket_dir: &str, cache: Option<ZettaCache>) {
+    pub fn start(socket_dir: &str, cache: Option<ZettaCache>, id: Uuid) {
         let socket_path = format!("{}/zfs_root_socket", socket_dir);
         let mut server = Server::new(
             &socket_path,
             0o600,
-            RootServerState {
-                cache,
-                id: Uuid::new_v4(),
-            },
+            RootServerState { cache, id },
             Box::new(Self::connection_handler),
         );
 
