@@ -790,8 +790,15 @@ agent_resume(void *arg)
 	if (spa->spa_load_state == SPA_LOAD_CREATE) {
 		agent_create_pool(vd, vos);
 	}
-	VERIFY0(agent_open_pool(vd, vos,
-	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_TRUE));
+
+	if (agent_open_pool(vd, vos,
+	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_TRUE) != 0) {
+		zfs_dbgmsg("agent resume failed, pool open failed");
+		vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
+		    VDEV_AUX_OPEN_FAILED);
+		vos->vos_agent_thread_exit = B_TRUE;
+		return;
+	}
 
 	if ((ret = agent_resume_state_check(vd)) != 0) {
 		zfs_dbgmsg("agent resume failed, uberblock changed");
