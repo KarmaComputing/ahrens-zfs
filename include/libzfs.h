@@ -463,6 +463,7 @@ _LIBZFS_H int zpool_checkpoint(zpool_handle_t *);
 _LIBZFS_H int zpool_discard_checkpoint(zpool_handle_t *);
 _LIBZFS_H boolean_t zpool_is_draid_spare(const char *);
 _LIBZFS_H boolean_t zpool_is_object_based(zpool_handle_t *);
+_LIBZFS_H boolean_t zpool_has_object_store_vdev(nvlist_t *);
 
 /*
  * Basic handle manipulations.  These functions do not create or destroy the

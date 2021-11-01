@@ -925,7 +925,9 @@ zpool_prop_get_feature(zpool_handle_t *zhp, const char *propname, char *buf,
 		spa_feature_t fid;
 
 		ret = zfeature_lookup_name(feature, &fid);
-		if (ret != 0) {
+		if (ret != 0 ||
+		    (spa_feature_table[fid].fi_flags & ZFEATURE_FLAG_AGENT &&
+		    !zpool_is_object_based(zhp))) {
 			(void) strlcpy(buf, "-", len);
 			return (ENOTSUP);
 		}
@@ -1236,7 +1238,7 @@ zpool_has_draid_vdev(nvlist_t *nvroot)
 /*
  * Check if vdev list contains an object store vdev
  */
-static boolean_t
+boolean_t
 zpool_has_object_store_vdev(nvlist_t *nvroot)
 {
 	nvlist_t **child;

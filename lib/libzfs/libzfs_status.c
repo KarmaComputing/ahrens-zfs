@@ -491,9 +491,12 @@ check_status(nvlist_t *config, boolean_t isimport,
 		default:
 			return (ZPOOL_STATUS_COMPATIBILITY_ERR);
 		}
+		boolean_t object_based = zpool_has_object_store_vdev(nvroot);
 		for (i = 0; i < SPA_FEATURES; i++) {
 			zfeature_info_t *fi = &spa_feature_table[i];
 			if (!fi->fi_zfs_mod_supported)
+				continue;
+			if (fi->fi_flags & ZFEATURE_FLAG_AGENT && !object_based)
 				continue;
 			if (c_features[i] && !nvlist_exists(feat, fi->fi_guid))
 				return (ZPOOL_STATUS_FEAT_DISABLED);
