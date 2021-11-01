@@ -1905,6 +1905,48 @@ function import_pool
 	return $?
 }
 
+# Return 0 if zdb runs successfully; $? otherwise
+#
+# -p <pool name> - REQUIRED
+# -e "<extra options to be passed to zdb>" - OPTIONAL
+
+function run_zdb
+{
+	typeset pool=""
+	typeset extra_options=""
+
+	typeset opt=""
+	while getopts "p:e:" opt; do
+		case $opt in
+			p) pool=$OPTARG ;;
+			e) extra_options=$OPTARG ;;
+		esac
+	done
+
+	if [[ -z $pool ]]; then
+		log_note "Missing pool name."
+		return 1
+	fi
+
+	typeset zdb_cmd=""
+	if use_object_store; then
+		zdb_cmd="zdb \
+			-B $ZTS_BUCKET_NAME
+			-a $ZTS_OBJECT_ENDPOINT \
+			-g $ZTS_REGION \
+			-f $ZTS_CREDS_PROFILE \
+			$extra_options \
+			$pool"
+	else
+		zdb_cmd="zdb $extra_options $pool"
+	fi
+
+	log_note $zdb_cmd
+	$zdb_cmd
+
+	return $?
+}
+
 # Return 0 if destroy successfully or the pool exists; $? otherwise
 # Note: In local zones, this function should return 0 silently.
 #

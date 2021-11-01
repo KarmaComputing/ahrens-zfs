@@ -72,16 +72,16 @@ zdb -k $TESTPOOL | grep "Dataset $CHECKPOINTED_FS1" || \
 
 log_must zpool export $TESTPOOL
 
-zdb -e $TESTPOOL | grep "Checkpointed uberblock found" || \
+run_zdb -e "-e" -p $TESTPOOL | grep "Checkpointed uberblock found" || \
 	log_fail "zdb could not find checkpointed uberblock"
 
-zdb -k -e $TESTPOOL | grep "Checkpointed uberblock found" && \
+run_zdb -e "-k -e" -p $TESTPOOL | grep "Checkpointed uberblock found" && \
 	log_fail "zdb found checkpointed uberblock in checkpointed state"
 
-zdb -e $TESTPOOL | grep "Dataset $FS1" && \
+run_zdb -e "-e" -p $TESTPOOL | grep "Dataset $FS1" && \
 	log_fail "zdb found destroyed dataset in current state"
 
-zdb -k -e $TESTPOOL | grep "Dataset $CHECKPOINTED_FS1" || \
+run_zdb -e "-k -e" -p $TESTPOOL | grep "Dataset $CHECKPOINTED_FS1" || \
 	log_fail "zdb could not find destroyed dataset in checkpoint"
 
 log_must import_pool -p $TESTPOOL

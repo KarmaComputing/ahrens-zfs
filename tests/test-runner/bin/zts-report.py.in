@@ -251,6 +251,8 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
             ['SKIP', object_store_skip],
         'cli_root/zpool_online/zpool_online_002_neg':
             ['SKIP', object_store_skip],
+    	'pool_checkpoint/checkpoint_removal': ['SKIP', object_store_skip],
+    	'pool_checkpoint/checkpoint_vdev_add': ['SKIP', object_store_skip],
     })
 
 #
