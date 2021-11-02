@@ -17,6 +17,7 @@
  */
 
 #include <sys/zfs_context.h>
+#include <sys/errno.h>
 #include <sys/spa.h>
 #include <sys/spa_impl.h>
 #include <sys/vdev_impl.h>
@@ -54,6 +55,12 @@ struct sockaddr_un zfs_root_socket = {
  * so the max "free blocks" request is ~1.2MB.
  */
 int vdev_object_store_max_frees = 100000;
+
+/*
+ * Counters for tracking partial writes and retries.
+ */
+static int partial_write_counter = 0;
+static int write_retry_counter = 0;
 
 typedef enum {
 	VOS_SOCK_UNINITIALIZED = 0,
@@ -252,28 +259,102 @@ zfs_object_store_close(vdev_object_store_t *vos)
 }
 
 static int
+agent_write_all(vdev_object_store_t *vos, void *buf, size_t len)
+{
+	uint64_t buflen64 = len;
+	char *buflen64_base = (char *)& buflen64;
+	uint64_t total_size = sizeof (buflen64) + buflen64;
+	uint64_t write_total = 0;
+	kvec_t iov[2] = {};
+
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
+
+	while (write_total < total_size) {
+		struct msghdr msg = {};
+		int iov_count;
+		if (write_total < sizeof (buflen64)) {
+			iov_count = 2;
+			iov[0].iov_base = buflen64_base + write_total;
+			iov[0].iov_len = sizeof (buflen64) - write_total;
+			iov[1].iov_base = buf;
+			iov[1].iov_len = len;
+		} else {
+			iov_count = 1;
+			iov[0].iov_base = buf + write_total - sizeof (buflen64);
+			iov[0].iov_len = len - write_total + sizeof (buflen64);
+		}
+
+		mutex_enter(&vos->vos_lock);
+		if (vos->vos_agent_thread_exit ||
+		    vos->vos_sock == INVALID_SOCKET) {
+			zfs_dbgmsg("(%px) agent_read_all shutting down",
+			    curthread);
+			mutex_exit(&vos->vos_lock);
+			return (SET_ERROR(ENOTCONN));
+		}
+		mutex_exit(&vos->vos_lock);
+
+		ssize_t sent;
+		do {
+			sent = ksock_send(vos->vos_sock, &msg, iov, iov_count,
+			    total_size - write_total);
+			if (sent < 0) {
+				if (sent == -ERESTARTSYS) {
+					write_retry_counter++;
+					zfs_dbgmsg("got ERESTARTSYS "
+					    "writing to socket, "
+					    "write_retry_counter: %d",
+					    write_retry_counter);
+				} else {
+					zfs_dbgmsg("error sending message to "
+					    "agent socket: %d", (int)sent);
+				}
+			}
+		} while (sent == -ERESTARTSYS);
+		if (sent > 0) {
+			write_total += sent;
+			if ((write_total < total_size) &&
+			    (zfs_flags & ZFS_DEBUG_OBJECT_STORE)) {
+				partial_write_counter++;
+				zfs_dbgmsg("incomplete ksock_send len=%d "
+				    "sent=%d write_total=%d "
+				    "partial_write_counter=%d",
+				    (int)total_size,
+				    (int)sent,
+				    (int)write_total,
+				    (int)partial_write_counter);
+			}
+		} else if (sent == 0) {
+			zfs_dbgmsg("agent restarted when writing len=%d, "
+			    "write_total=%d",
+			    (int)total_size,
+			    (int)write_total);
+			return (SET_ERROR(EAGAIN));
+		} else {
+			zfs_dbgmsg("error sending message to agent socket: "
+			    "for total_size=%d, got %d",
+			    (int)total_size,
+			    (int)sent);
+			return (SET_ERROR(EAGAIN));
+		}
+	}
+	return (0);
+}
+
+static int
 agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 {
 	spa_t *spa = vos->vos_vdev->vdev_spa;
 
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 
-	struct msghdr msg = {};
-	kvec_t iov[2] = {};
-	size_t iov_size = 0;
-	char *iov_buf = fnvlist_pack(nv, &iov_size);
-	uint64_t size64 = iov_size;
+	size_t len = 0;
+	char *buf = fnvlist_pack(nv, &len);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("sending %llu-byte request to agent type=%s",
-		    (u_longlong_t)size64,
+		    (u_longlong_t)len,
 		    fnvlist_lookup_string(nv, AGENT_TYPE));
 	}
-
-	iov[0].iov_base = &size64;
-	iov[0].iov_len = sizeof (size64);
-	iov[1].iov_base = iov_buf;
-	iov[1].iov_len = iov_size;
-	uint64_t total_size = sizeof (size64) + iov_size;
 
 	if (vos->vos_sock_state < VOS_SOCK_OPEN) {
 		return (SET_ERROR(ENOTCONN));
@@ -284,12 +365,9 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 		zio_handle_panic_injection(spa, tag, 1);
 	}
 
-	size_t sent = ksock_send(vos->vos_sock, &msg, iov,
-	    2, total_size);
-	if (sent != total_size) {
-		zfs_dbgmsg("sent wrong length to agent socket: "
-		    "expected %d got %d, closing socket",
-		    (int)total_size, (int)sent);
+	int err = agent_write_all(vos, buf, len);
+	if (err != 0) {
+		zfs_dbgmsg("agent_request(%px) got err %d", curthread, err);
 
 		/*
 		 * If we were unable to send, then the kernel
@@ -309,9 +387,9 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 		zfs_dbgmsg("%s INJECTION after send", tag);
 		zio_handle_panic_injection(spa, tag, 2);
 	}
-	fnvlist_pack_free(iov_buf, iov_size);
+	fnvlist_pack_free(buf, len);
 
-	return (sent == total_size ? 0 : SET_ERROR(EINTR));
+	return (err != 0 ? SET_ERROR(EINTR) : 0);
 }
 
 static int

@@ -59,9 +59,9 @@ int ksock_connect(ksocket_t sock, struct sockaddr *socket_address,
     unsigned long socklen);
 void ksock_close(ksocket_t sock);
 int ksock_shutdown(ksocket_t sock, int how);
-size_t ksock_send(ksocket_t sock, struct msghdr *msg, kvec_t *iov, int iovcnt,
+ssize_t ksock_send(ksocket_t sock, struct msghdr *msg, kvec_t *iov, int iovcnt,
     int total_size);
-size_t ksock_receive(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
+ssize_t ksock_receive(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
     int iovcnt, int total_size, int flags);
 
 #ifdef	__cplusplus

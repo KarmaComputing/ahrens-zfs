@@ -51,14 +51,14 @@ ksock_shutdown(ksocket_t sock, int how)
 	return (kernel_sock_shutdown(sock, how));
 }
 
-size_t
+ssize_t
 ksock_send(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
     int iovcnt, int total_size)
 {
 	return (kernel_sendmsg(sock, msg, iov, iovcnt, total_size));
 }
 
-size_t
+ssize_t
 ksock_receive(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
     int iovcnt, int total_size, int flags)
 {
@@ -95,14 +95,14 @@ ksock_shutdown(ksocket_t sock, int how)
 	return (shutdown(sock, how));
 }
 
-size_t
+ssize_t
 ksock_send(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
     int iovcnt, int total_size)
 {
 	return (writev(sock, iov, iovcnt));
 }
 
-size_t
+ssize_t
 ksock_receive(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
     int iovcnt, int total_size, int flags)
 {

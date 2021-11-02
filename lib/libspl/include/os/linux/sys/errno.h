@@ -43,4 +43,6 @@
 /* Similar for ENOACTIVE */
 #define	ENOTACTIVE	ENOANO
 
+#define	ERESTARTSYS	512
+
 #endif /* _LIBSPL_SYS_ERRNO_H */
