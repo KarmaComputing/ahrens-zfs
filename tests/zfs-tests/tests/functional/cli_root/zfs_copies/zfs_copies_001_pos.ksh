@@ -51,9 +51,7 @@ function cleanup
 	typeset ds
 
 	for ds in $fs1 $fs2 $vol1 $vol2; do
-		if datasetexists $ds; then
-			log_must zfs destroy $ds
-		fi
+		datasetexists $ds && destroy_dataset $ds
 	done
 }
 
@@ -81,7 +79,7 @@ function test_zfs_create_with_copies
 	done
 
 	for ds in $fs1 $vol1; do
-		log_must zfs destroy $ds
+		destroy_dataset $ds
 		block_device_wait
 	done
 }
