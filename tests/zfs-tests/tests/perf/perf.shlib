@@ -63,7 +63,12 @@ function fill_zetta_cache
 	export BLOCKSIZE=1m
 	export SYNC_TYPE=1
 	export DIRECT=0
-	log_must fio  --output /tmp/fio_fill.out $FIO_SCRIPTS/sequential_reads.fio
+
+	#
+	# Flush ARC so that reads reach object store and can populate zettacache
+	#
+	log_must zinject -a
+	log_must fio  --output /tmp/fio_fill.out $FIO_SCRIPTS/sequential_reads_fill.fio
 }
 
 function do_fio_run_impl

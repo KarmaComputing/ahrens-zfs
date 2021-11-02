@@ -54,7 +54,7 @@ populate_perf_filesystems
 
 # Aim to fill the pool to 50% capacity while accounting for a 3x compressratio.
 if use_object_store; then
-	export TOTAL_SIZE=$((128 * 1024 * 1024 * 1024))
+	export TOTAL_SIZE=$((64 * 1024 * 1024 * 1024))
 else
 	export TOTAL_SIZE=$(($(get_prop avail $PERFPOOL) * 3 / 2))
 fi
@@ -74,7 +74,7 @@ export DIRECTORY=$(get_directory)
 log_must fio $FIO_SCRIPTS/mkfiles.fio
 
 # Populate ZettaCache if applicable
-fill_zetta_cache 600
+fill_zetta_cache 1800
 
 # Set up the scripts and output files that will log performance data.
 lun_list=$(pool_to_lun_list $PERFPOOL)
