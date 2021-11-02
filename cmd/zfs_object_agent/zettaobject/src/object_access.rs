@@ -14,7 +14,9 @@ use log::*;
 use lru::LruCache;
 use rand::prelude::*;
 use rusoto_core::{ByteStream, RusotoError};
-use rusoto_credential::{AutoRefreshingProvider, ChainProvider, ProfileProvider};
+use rusoto_credential::{
+    AutoRefreshingProvider, ChainProvider, InstanceMetadataProvider, ProfileProvider,
+};
 use rusoto_s3::{
     Delete, DeleteObjectsRequest, GetObjectRequest, HeadObjectOutput, HeadObjectRequest,
     ListObjectsV2Request, ObjectIdentifier, PutObjectError, PutObjectOutput, PutObjectRequest,
@@ -348,6 +350,18 @@ impl ObjectAccess {
         rusoto_s3::S3Client::new_with(http_client, creds, region)
     }
 
+    /// Get client using the instance metadata provider and ignoring all other sources of credentials.
+    pub fn get_client_with_instance_profile(endpoint: &str, region_str: &str) -> S3Client {
+        let http_client = rusoto_core::HttpClient::new().unwrap();
+        let creds = InstanceMetadataProvider::new();
+        let region = ObjectAccess::get_custom_region(endpoint, region_str);
+        rusoto_s3::S3Client::new_with(http_client, creds, region)
+    }
+
+    /// Get client by checking in order, the following sources for credentials.
+    /// 1. Environment variables
+    /// 2. AWS credentials file
+    /// 3. IAM instance profile.
     pub fn get_client(
         endpoint: &str,
         region_str: &str,

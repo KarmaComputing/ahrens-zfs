@@ -17,5 +17,6 @@ mod public_connection;
 mod root_connection;
 mod server;
 
-pub use object_access::{ObjectAccess, ObjectAccessStatType, StatMapValue};
+pub use object_access::{OAError, ObjectAccess, ObjectAccessStatType, StatMapValue};
+pub mod test_connectivity;
 pub use pool::Pool;

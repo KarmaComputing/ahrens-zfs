@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use zettacache::base_types::*;
 use zettaobject::base_types::*;
+use zettaobject::ObjectAccess;
 use zettaobject::Pool;
-use zettaobject::{ObjectAccess, ObjectAccessStatType};
 mod client;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
@@ -411,39 +411,6 @@ fn get_object_access(
     }
 }
 
-// Test by writing and deleting an object.
-async fn do_test_connectivity(object_access: &ObjectAccess) {
-    let num = thread_rng().gen::<u64>();
-    let file = format!("test/test_connectivity_{}", num);
-    let content = "test connectivity to S3".as_bytes().to_vec();
-
-    object_access
-        .put_object(
-            file.clone(),
-            content.into(),
-            ObjectAccessStatType::MetadataPut,
-        )
-        .await;
-    object_access.delete_object(file).await;
-}
-
-async fn test_connectivity(object_access: &ObjectAccess) -> Result<(), Box<dyn Error>> {
-    std::process::exit(
-        match tokio::time::timeout(Duration::from_secs(30), do_test_connectivity(object_access))
-            .await
-        {
-            Err(_) => {
-                eprintln!("Connectivity test failed.");
-                -1
-            }
-            Ok(_) => {
-                println!("Connectivity test succeeded.");
-                0
-            }
-        },
-    );
-}
-
 #[tokio::main]
 async fn main() {
     let matches = clap::App::new("zoa_test")
@@ -518,7 +485,6 @@ async fn main() {
                         .help("number of days"),
                 ),
         )
-        .subcommand(SubCommand::with_name("test_connectivity").about("test connectivity"))
         .get_matches();
 
     // Command line parameters
@@ -584,9 +550,6 @@ async fn main() {
             let min_age = Duration::from_secs(age_str.parse::<u64>().unwrap() * 60 * 60 * 24);
 
             do_destroy_old_pools(&object_access, min_age).await.unwrap();
-        }
-        ("test_connectivity", Some(_matches)) => {
-            test_connectivity(&object_access).await.unwrap();
         }
         _ => {
             matches.usage();

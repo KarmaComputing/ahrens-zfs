@@ -2775,6 +2775,7 @@ dependencies = [
 name = "zoa_test"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-recursion",
  "chrono",
  "clap",
