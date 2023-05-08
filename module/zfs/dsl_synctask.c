@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -32,10 +32,10 @@
 
 #define	DST_AVG_BLKSHIFT 14
 
-/* ARGSUSED */
 static int
 dsl_null_checkfunc(void *arg, dmu_tx_t *tx)
 {
+	(void) arg, (void) tx;
 	return (0);
 }
 

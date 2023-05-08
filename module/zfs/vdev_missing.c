@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -42,7 +42,6 @@
 #include <sys/fs/zfs.h>
 #include <sys/zio.h>
 
-/* ARGSUSED */
 static int
 vdev_missing_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
     uint64_t *ashift, uint64_t *pshift)
@@ -53,6 +52,7 @@ vdev_missing_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	 * VDEV_AUX_BAD_GUID_SUM.  So we pretend to succeed, knowing that we
 	 * will fail the GUID sum check before ever trying to open the pool.
 	 */
+	(void) vd;
 	*psize = 0;
 	*max_psize = 0;
 	*ashift = 0;
@@ -60,13 +60,12 @@ vdev_missing_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	return (0);
 }
 
-/* ARGSUSED */
 static void
 vdev_missing_close(vdev_t *vd)
 {
+	(void) vd;
 }
 
-/* ARGSUSED */
 static void
 vdev_missing_io_start(zio_t *zio)
 {
@@ -74,10 +73,10 @@ vdev_missing_io_start(zio_t *zio)
 	zio_execute(zio);
 }
 
-/* ARGSUSED */
 static void
 vdev_missing_io_done(zio_t *zio)
 {
+	(void) zio;
 }
 
 vdev_ops_t vdev_missing_ops = {

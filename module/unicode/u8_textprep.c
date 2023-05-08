@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -23,6 +23,9 @@
  * Use is subject to license terms.
  */
 
+/*
+ * Copyright 2022 MNX Cloud, Inc.
+ */
 
 
 
@@ -36,7 +39,7 @@
  */
 
 #include <sys/types.h>
-#include <sys/strings.h>
+#include <sys/string.h>
 #include <sys/param.h>
 #include <sys/sysmacros.h>
 #include <sys/debug.h>
@@ -200,7 +203,7 @@ typedef enum {
 #define	I_				U8_ILLEGAL_CHAR
 #define	O_				U8_OUT_OF_RANGE_CHAR
 
-const int8_t u8_number_of_bytes[0x100] = {
+static const int8_t u8_number_of_bytes[0x100] = {
 	1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
 	1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
 	1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
@@ -213,10 +216,10 @@ const int8_t u8_number_of_bytes[0x100] = {
 /*	80  81  82  83  84  85  86  87  88  89  8A  8B  8C  8D  8E  8F  */
 	I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_,
 
-/*  	90  91  92  93  94  95  96  97  98  99  9A  9B  9C  9D  9E  9F  */
+/*	90  91  92  93  94  95  96  97  98  99  9A  9B  9C  9D  9E  9F  */
 	I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_,
 
-/*  	A0  A1  A2  A3  A4  A5  A6  A7  A8  A9  AA  AB  AC  AD  AE  AF  */
+/*	A0  A1  A2  A3  A4  A5  A6  A7  A8  A9  AA  AB  AC  AD  AE  AF  */
 	I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_, I_,
 
 /*	B0  B1  B2  B3  B4  B5  B6  B7  B8  B9  BA  BB  BC  BD  BE  BF  */
@@ -238,7 +241,7 @@ const int8_t u8_number_of_bytes[0x100] = {
 #undef	I_
 #undef	O_
 
-const uint8_t u8_valid_min_2nd_byte[0x100] = {
+static const uint8_t u8_valid_min_2nd_byte[0x100] = {
 	0,    0,    0,    0,    0,    0,    0,    0,
 	0,    0,    0,    0,    0,    0,    0,    0,
 	0,    0,    0,    0,    0,    0,    0,    0,
@@ -280,7 +283,7 @@ const uint8_t u8_valid_min_2nd_byte[0x100] = {
 	0,    0,    0,    0,    0,    0,    0,    0,
 };
 
-const uint8_t u8_valid_max_2nd_byte[0x100] = {
+static const uint8_t u8_valid_max_2nd_byte[0x100] = {
 	0,    0,    0,    0,    0,    0,    0,    0,
 	0,    0,    0,    0,    0,    0,    0,    0,
 	0,    0,    0,    0,    0,    0,    0,    0,
@@ -1286,8 +1289,12 @@ TRY_THE_NEXT_MARK:
 		saved_l = l - disp[last];
 
 		while (p < oslast) {
-			size = u8_number_of_bytes[*p];
-			if (size <= 1 || (p + size) > oslast)
+			int8_t number_of_bytes = u8_number_of_bytes[*p];
+
+			if (number_of_bytes <= 1)
+				break;
+			size = number_of_bytes;
+			if ((p + size) > oslast)
 				break;
 
 			saved_p = p;
@@ -1378,8 +1385,10 @@ SAFE_RETURN:
  */
 static size_t
 collect_a_seq(size_t uv, uchar_t *u8s, uchar_t **source, uchar_t *slast,
-    boolean_t is_it_toupper, boolean_t is_it_tolower,
-    boolean_t canonical_decomposition, boolean_t compatibility_decomposition,
+    boolean_t is_it_toupper,
+    boolean_t is_it_tolower,
+    boolean_t canonical_decomposition,
+    boolean_t compatibility_decomposition,
     boolean_t canonical_composition,
     int *errnum, u8_normalization_states_t *state)
 {
@@ -2128,27 +2137,6 @@ u8_textprep_str(char *inarray, size_t *inlen, char *outarray, size_t *outlen,
 
 	return (ret_val);
 }
-
-#if defined(_KERNEL)
-static int __init
-unicode_init(void)
-{
-	return (0);
-}
-
-static void __exit
-unicode_fini(void)
-{
-}
-
-module_init(unicode_init);
-module_exit(unicode_fini);
-#endif
-
-ZFS_MODULE_DESCRIPTION("Unicode implementation");
-ZFS_MODULE_AUTHOR(ZFS_META_AUTHOR);
-ZFS_MODULE_LICENSE(ZFS_META_LICENSE);
-ZFS_MODULE_VERSION(ZFS_META_VERSION "-" ZFS_META_RELEASE);
 
 EXPORT_SYMBOL(u8_validate);
 EXPORT_SYMBOL(u8_strcmp);

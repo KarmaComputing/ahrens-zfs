@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -81,7 +81,7 @@ zfs_append_partition(char *path, size_t max_len)
  * caller must free the returned string
  */
 char *
-zfs_strip_partition(char *path)
+zfs_strip_partition(const char *path)
 {
 	char *tmp = strdup(path);
 	char *part = NULL, *d = NULL;
@@ -117,7 +117,7 @@ zfs_strip_partition(char *path)
  * Returned string must be freed.
  */
 static char *
-zfs_strip_partition_path(char *path)
+zfs_strip_partition_path(const char *path)
 {
 	char *newpath = strdup(path);
 	char *sd_offset;
@@ -148,10 +148,18 @@ zfs_strip_partition_path(char *path)
 /*
  * Strip the unwanted portion of a device path.
  */
-char *
-zfs_strip_path(char *path)
+const char *
+zfs_strip_path(const char *path)
 {
-	return (strrchr(path, '/') + 1);
+	size_t spath_count;
+	const char *const *spaths = zpool_default_search_paths(&spath_count);
+
+	for (size_t i = 0; i < spath_count; ++i)
+		if (strncmp(path, spaths[i], strlen(spaths[i])) == 0 &&
+		    path[strlen(spaths[i])] == '/')
+			return (path + strlen(spaths[i]) + 1);
+
+	return (path);
 }
 
 /*
@@ -265,7 +273,6 @@ zfs_get_pci_slots_sys_path(const char *dev_name)
 			free(address2);
 			if (asprintf(&path, "/sys/bus/pci/slots/%s",
 			    ep->d_name) == -1) {
-				free(tmp);
 				continue;
 			}
 			break;
@@ -337,6 +344,8 @@ zfs_get_enclosure_sysfs_path(const char *dev_name)
 		if (strstr(ep->d_name, "enclosure_device") == NULL)
 			continue;
 
+		if (tmp2 != NULL)
+			free(tmp2);
 		if (asprintf(&tmp2, "%s/%s", tmp1, ep->d_name) == -1) {
 			tmp2 = NULL;
 			break;
@@ -365,14 +374,13 @@ zfs_get_enclosure_sysfs_path(const char *dev_name)
 		if (tmp3 == NULL)
 			break;
 
+		if (path != NULL)
+			free(path);
 		if (asprintf(&path, "/sys/class/%s", tmp3) == -1) {
 			/* If asprintf() fails, 'path' is undefined */
 			path = NULL;
 			break;
 		}
-
-		if (path == NULL)
-			break;
 	}
 
 end:
@@ -420,7 +428,6 @@ dm_get_underlying_path(const char *dm_name)
 	char *tmp = NULL;
 	char *path = NULL;
 	char *dev_str;
-	int size;
 	char *first_path = NULL;
 	char *enclosure_path;
 
@@ -442,7 +449,7 @@ dm_get_underlying_path(const char *dm_name)
 	else
 		dev_str = tmp;
 
-	if ((size = asprintf(&tmp, "/sys/block/%s/slaves/", dev_str)) == -1) {
+	if (asprintf(&tmp, "/sys/block/%s/slaves/", dev_str) == -1) {
 		tmp = NULL;
 		goto end;
 	}
@@ -471,8 +478,7 @@ dm_get_underlying_path(const char *dm_name)
 			if (!enclosure_path)
 				continue;
 
-			if ((size = asprintf(
-			    &path, "/dev/%s", ep->d_name)) == -1)
+			if (asprintf(&path, "/dev/%s", ep->d_name) == -1)
 				path = NULL;
 			free(enclosure_path);
 			break;
@@ -491,7 +497,7 @@ end:
 		 * enclosure devices.  Throw up out hands and return the first
 		 * underlying path.
 		 */
-		if ((size = asprintf(&path, "/dev/%s", first_path)) == -1)
+		if (asprintf(&path, "/dev/%s", first_path) == -1)
 			path = NULL;
 	}
 
@@ -527,7 +533,7 @@ zfs_dev_is_dm(const char *dev_name)
 boolean_t
 zfs_dev_is_whole_disk(const char *dev_name)
 {
-	struct dk_gpt *label;
+	struct dk_gpt *label = NULL;
 	int fd;
 
 	if ((fd = open(dev_name, O_RDONLY | O_DIRECT | O_CLOEXEC)) < 0)
@@ -613,22 +619,24 @@ zfs_get_underlying_path(const char *dev_name)
 /*
  * A disk is considered a multipath whole disk when:
  *	DEVNAME key value has "dm-"
- *	DM_NAME key value has "mpath" prefix
- *	DM_UUID key exists
+ *	DM_UUID key exists and starts with 'mpath-'
  *	ID_PART_TABLE_TYPE key does not exist or is not gpt
+ *	ID_FS_LABEL key does not exist (disk isn't labeled)
  */
 static boolean_t
-udev_mpath_whole_disk(struct udev_device *dev)
+is_mpath_udev_sane(struct udev_device *dev)
 {
-	const char *devname, *type, *uuid;
+	const char *devname, *type, *uuid, *label;
 
 	devname = udev_device_get_property_value(dev, "DEVNAME");
 	type = udev_device_get_property_value(dev, "ID_PART_TABLE_TYPE");
 	uuid = udev_device_get_property_value(dev, "DM_UUID");
+	label = udev_device_get_property_value(dev, "ID_FS_LABEL");
 
 	if ((devname != NULL && strncmp(devname, "/dev/dm-", 8) == 0) &&
 	    ((type == NULL) || (strcmp(type, "gpt") != 0)) &&
-	    (uuid != NULL)) {
+	    ((uuid != NULL) && (strncmp(uuid, "mpath-", 6) == 0)) &&
+	    (label == NULL)) {
 		return (B_TRUE);
 	}
 
@@ -636,7 +644,11 @@ udev_mpath_whole_disk(struct udev_device *dev)
 }
 
 /*
- * Check if a disk is effectively a multipath whole disk
+ * Check if a disk is a multipath "blank" disk:
+ *
+ * 1. The disk has udev values that suggest it's a multipath disk
+ * 2. The disk is not currently labeled with a filesystem of any type
+ * 3. There are no partitions on the disk
  */
 boolean_t
 is_mpath_whole_disk(const char *path)
@@ -645,7 +657,6 @@ is_mpath_whole_disk(const char *path)
 	struct udev_device *dev = NULL;
 	char nodepath[MAXPATHLEN];
 	char *sysname;
-	boolean_t wholedisk = B_FALSE;
 
 	if (realpath(path, nodepath) == NULL)
 		return (B_FALSE);
@@ -660,18 +671,19 @@ is_mpath_whole_disk(const char *path)
 		return (B_FALSE);
 	}
 
-	wholedisk = udev_mpath_whole_disk(dev);
-
+	/* Sanity check some udev values */
+	boolean_t is_sane = is_mpath_udev_sane(dev);
 	udev_device_unref(dev);
-	return (wholedisk);
+
+	return (is_sane);
 }
 
 #else /* HAVE_LIBUDEV */
 
-/* ARGSUSED */
 boolean_t
 is_mpath_whole_disk(const char *path)
 {
+	(void) path;
 	return (B_FALSE);
 }
 

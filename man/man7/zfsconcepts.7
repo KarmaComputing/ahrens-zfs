@@ -6,7 +6,7 @@
 .\" You may not use this file except in compliance with the License.
 .\"
 .\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or http://www.opensolaris.org/os/licensing.
+.\" or https://opensource.org/licenses/CDDL-1.0.
 .\" See the License for the specific language governing permissions
 .\" and limitations under the License.
 .\"
@@ -81,7 +81,8 @@ Bookmarks can be created extremely quickly, compared to snapshots, and they
 consume no additional space within the pool.
 Bookmarks can also have arbitrary names, much like snapshots.
 .Pp
-Unlike snapshots, bookmarks can not be accessed through the filesystem in any way.
+Unlike snapshots, bookmarks can not be accessed through the filesystem in any
+way.
 From a storage standpoint a bookmark just provides a way to reference
 when a snapshot was created as a distinct object.
 Bookmarks are initially tied to a snapshot, not the filesystem or volume,
@@ -193,10 +194,10 @@ Calculating the exact requirement depends heavily
 on the type of data stored in the pool.
 .Pp
 Enabling deduplication on an improperly-designed system can result in
-performance issues (slow IO and administrative operations).
+performance issues (slow I/O and administrative operations).
 It can potentially lead to problems importing a pool due to memory exhaustion.
 Deduplication can consume significant processing power (CPU) and memory as well
-as generate additional disk IO.
+as generate additional disk I/O.
 .Pp
 Before creating a pool with deduplication enabled, ensure that you have planned
 your hardware requirements appropriately and implemented appropriate recovery

@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -28,6 +28,7 @@
  * Copyright 2017 Joyent, Inc.
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019, Datto Inc. All rights reserved.
+ * Copyright (c) 2021, Klara Inc.
  * Copyright [2021] Hewlett Packard Enterprise Development LP
  */
 
@@ -60,6 +61,7 @@
 #include <sys/vdev_raidz.h>
 #include <sys/zvol.h>
 #include <sys/zfs_ratelimit.h>
+#include "zfs_prop.h"
 
 /*
  * One metaslab from each (normal-class) vdev is used by the ZIL.  These are
@@ -80,22 +82,22 @@
  * 1 << (spa_slop_shift + 1), on small pools the usable space may be reduced
  * (by more than 1<<spa_slop_shift) due to the embedded slog metaslab.
  */
-int zfs_embedded_slog_min_ms = 64;
+static uint_t zfs_embedded_slog_min_ms = 64;
 
 /* default target for number of metaslabs per top-level vdev */
-int zfs_vdev_default_ms_count = 200;
+static uint_t zfs_vdev_default_ms_count = 200;
 
 /* minimum number of metaslabs per top-level vdev */
-int zfs_vdev_min_ms_count = 16;
+static uint_t zfs_vdev_min_ms_count = 16;
 
 /* practical upper limit of total metaslabs per top-level vdev */
-int zfs_vdev_ms_count_limit = 1ULL << 17;
+static uint_t zfs_vdev_ms_count_limit = 1ULL << 17;
 
 /* lower limit for metaslab size (512M) */
-int zfs_vdev_default_ms_shift = 29;
+static uint_t zfs_vdev_default_ms_shift = 29;
 
 /* upper limit for metaslab size (16G) */
-int zfs_vdev_max_ms_shift = 34;
+static uint_t zfs_vdev_max_ms_shift = 34;
 
 int vdev_validate_skip = B_FALSE;
 
@@ -108,18 +110,18 @@ int zfs_vdev_dtl_sm_blksz = (1 << 12);
 /*
  * Rate limit slow IO (delay) events to this many per second.
  */
-unsigned int zfs_slow_io_events_per_second = 20;
+static unsigned int zfs_slow_io_events_per_second = 20;
 
 /*
  * Rate limit checksum events after this many checksum errors per second.
  */
-unsigned int zfs_checksum_events_per_second = 20;
+static unsigned int zfs_checksum_events_per_second = 20;
 
 /*
  * Ignore errors during scrub/resilver.  Allows to work around resilver
  * upon import when there are pool errors.
  */
-int zfs_scan_ignore_errors = 0;
+static int zfs_scan_ignore_errors = 0;
 
 /*
  * vdev-wide space maps that have lots of entries written to them at
@@ -135,8 +137,16 @@ int zfs_vdev_standard_sm_blksz = (1 << 17);
  */
 int zfs_nocacheflush = 0;
 
-uint64_t zfs_vdev_max_auto_ashift = ASHIFT_MAX;
-uint64_t zfs_vdev_min_auto_ashift = ASHIFT_MIN;
+/*
+ * Maximum and minimum ashift values that can be automatically set based on
+ * vdev's physical ashift (disk's physical sector size).  While ASHIFT_MAX
+ * is higher than the maximum value, it is intentionally limited here to not
+ * excessively impact pool space efficiency.  Higher ashift values may still
+ * be forced by vdev logical ashift or by user via ashift property, but won't
+ * be set automatically as a performance optimization.
+ */
+uint_t zfs_vdev_max_auto_ashift = 14;
+uint_t zfs_vdev_min_auto_ashift = ASHIFT_MIN;
 
 void
 vdev_dbgmsg(vdev_t *vd, const char *fmt, ...)
@@ -215,7 +225,7 @@ vdev_dbgmsg_print_tree(vdev_t *vd, int indent)
  * Virtual device management.
  */
 
-static vdev_ops_t *vdev_ops_table[] = {
+static vdev_ops_t *const vdev_ops_table[] = {
 	&vdev_root_ops,
 	&vdev_raidz_ops,
 	&vdev_draid_ops,
@@ -237,7 +247,7 @@ static vdev_ops_t *vdev_ops_table[] = {
 static vdev_ops_t *
 vdev_getops(const char *type)
 {
-	vdev_ops_t *ops, **opspp;
+	vdev_ops_t *ops, *const *opspp;
 
 	for (opspp = vdev_ops_table; (ops = *opspp) != NULL; opspp++)
 		if (strcmp(ops->vdev_op_type, type) == 0)
@@ -262,11 +272,12 @@ vdev_get_mg(vdev_t *vd, metaslab_class_t *mc)
 		return (vd->vdev_mg);
 }
 
-/* ARGSUSED */
 void
 vdev_default_xlate(vdev_t *vd, const range_seg64_t *logical_rs,
     range_seg64_t *physical_rs, range_seg64_t *remain_rs)
 {
+	(void) vd, (void) remain_rs;
+
 	physical_rs->rs_start = logical_rs->rs_start;
 	physical_rs->rs_end = logical_rs->rs_end;
 }
@@ -379,6 +390,33 @@ vdev_get_nparity(vdev_t *vd)
 	return (nparity);
 }
 
+static int
+vdev_prop_get_int(vdev_t *vd, vdev_prop_t prop, uint64_t *value)
+{
+	spa_t *spa = vd->vdev_spa;
+	objset_t *mos = spa->spa_meta_objset;
+	uint64_t objid;
+	int err;
+
+	if (vd->vdev_root_zap != 0) {
+		objid = vd->vdev_root_zap;
+	} else if (vd->vdev_top_zap != 0) {
+		objid = vd->vdev_top_zap;
+	} else if (vd->vdev_leaf_zap != 0) {
+		objid = vd->vdev_leaf_zap;
+	} else {
+		return (EINVAL);
+	}
+
+	err = zap_lookup(mos, objid, vdev_prop_to_name(prop),
+	    sizeof (uint64_t), 1, value);
+
+	if (err == ENOENT)
+		*value = vdev_prop_default_numeric(prop);
+
+	return (err);
+}
+
 /*
  * Get the number of data disks for a top-level vdev.
  */
@@ -473,7 +511,7 @@ vdev_add_child(vdev_t *pvd, vdev_t *cvd)
 
 	newchild = kmem_alloc(newsize, KM_SLEEP);
 	if (pvd->vdev_child != NULL) {
-		bcopy(pvd->vdev_child, newchild, oldsize);
+		memcpy(newchild, pvd->vdev_child, oldsize);
 		kmem_free(pvd->vdev_child, oldsize);
 	}
 
@@ -632,6 +670,14 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	zfs_ratelimit_init(&vd->vdev_checksum_rl,
 	    &zfs_checksum_events_per_second, 1);
 
+	/*
+	 * Default Thresholds for tuning ZED
+	 */
+	vd->vdev_checksum_n = vdev_prop_default_numeric(VDEV_PROP_CHECKSUM_N);
+	vd->vdev_checksum_t = vdev_prop_default_numeric(VDEV_PROP_CHECKSUM_T);
+	vd->vdev_io_n = vdev_prop_default_numeric(VDEV_PROP_IO_N);
+	vd->vdev_io_t = vdev_prop_default_numeric(VDEV_PROP_IO_T);
+
 	list_link_init(&vd->vdev_config_dirty_node);
 	list_link_init(&vd->vdev_state_dirty_node);
 	list_link_init(&vd->vdev_initialize_node);
@@ -653,6 +699,7 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	mutex_init(&vd->vdev_trim_io_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&vd->vdev_trim_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vd->vdev_autotrim_cv, NULL, CV_DEFAULT, NULL);
+	cv_init(&vd->vdev_autotrim_kick_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vd->vdev_trim_io_cv, NULL, CV_DEFAULT, NULL);
 
 	mutex_init(&vd->vdev_rebuild_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -684,11 +731,11 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
     int alloctype)
 {
 	vdev_ops_t *ops;
-	char *type;
+	const char *type;
 	uint64_t guid = 0, islog;
 	vdev_t *vd;
 	vdev_indirect_config_t *vic;
-	char *tmp = NULL;
+	const char *tmp = NULL;
 	int rc;
 	vdev_alloc_bias_t alloc_bias = VDEV_BIAS_NONE;
 	boolean_t top_level = (parent && !parent->vdev_parent);
@@ -743,7 +790,7 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 		return (SET_ERROR(ENOTSUP));
 
 	if (top_level && alloctype == VDEV_ALLOC_ADD) {
-		char *bias;
+		const char *bias;
 
 		/*
 		 * If creating a top-level vdev, check for allocation
@@ -789,8 +836,8 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 	if (top_level && alloc_bias != VDEV_BIAS_NONE)
 		vd->vdev_alloc_bias = alloc_bias;
 
-	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &vd->vdev_path) == 0)
-		vd->vdev_path = spa_strdup(vd->vdev_path);
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &tmp) == 0)
+		vd->vdev_path = spa_strdup(tmp);
 
 	/*
 	 * ZPOOL_CONFIG_AUX_STATE = "external" means we previously forced a
@@ -804,18 +851,17 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 		vd->vdev_label_aux = VDEV_AUX_EXTERNAL;
 	}
 
-	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_DEVID, &vd->vdev_devid) == 0)
-		vd->vdev_devid = spa_strdup(vd->vdev_devid);
-	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PHYS_PATH,
-	    &vd->vdev_physpath) == 0)
-		vd->vdev_physpath = spa_strdup(vd->vdev_physpath);
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_DEVID, &tmp) == 0)
+		vd->vdev_devid = spa_strdup(tmp);
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PHYS_PATH, &tmp) == 0)
+		vd->vdev_physpath = spa_strdup(tmp);
 
 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_VDEV_ENC_SYSFS_PATH,
-	    &vd->vdev_enc_sysfs_path) == 0)
-		vd->vdev_enc_sysfs_path = spa_strdup(vd->vdev_enc_sysfs_path);
+	    &tmp) == 0)
+		vd->vdev_enc_sysfs_path = spa_strdup(tmp);
 
-	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_FRU, &vd->vdev_fru) == 0)
-		vd->vdev_fru = spa_strdup(vd->vdev_fru);
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_FRU, &tmp) == 0)
+		vd->vdev_fru = spa_strdup(tmp);
 
 	/*
 	 * Set the whole_disk property.  If it's not specified, leave the value
@@ -855,6 +901,14 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 	(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_CREATE_TXG,
 	    &vd->vdev_crtxg);
 
+	if (vd->vdev_ops == &vdev_root_ops &&
+	    (alloctype == VDEV_ALLOC_LOAD ||
+	    alloctype == VDEV_ALLOC_SPLIT ||
+	    alloctype == VDEV_ALLOC_ROOTPOOL)) {
+		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_VDEV_ROOT_ZAP,
+		    &vd->vdev_root_zap);
+	}
+
 	/*
 	 * If we're a top-level vdev, try to load the allocation parameters.
 	 */
@@ -866,6 +920,8 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 		    &vd->vdev_ms_shift);
 		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_ASIZE,
 		    &vd->vdev_asize);
+		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_NONALLOCATING,
+		    &vd->vdev_noalloc);
 		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_REMOVING,
 		    &vd->vdev_removing);
 		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_VDEV_TOP_ZAP,
@@ -946,7 +1002,7 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 			    &vd->vdev_removed);
 
 			if (vd->vdev_faulted || vd->vdev_degraded) {
-				char *aux;
+				const char *aux;
 
 				vd->vdev_label_aux =
 				    VDEV_AUX_ERR_EXCEEDED;
@@ -1106,6 +1162,7 @@ vdev_free(vdev_t *vd)
 	mutex_destroy(&vd->vdev_trim_io_lock);
 	cv_destroy(&vd->vdev_trim_cv);
 	cv_destroy(&vd->vdev_autotrim_cv);
+	cv_destroy(&vd->vdev_autotrim_kick_cv);
 	cv_destroy(&vd->vdev_trim_io_cv);
 
 	mutex_destroy(&vd->vdev_rebuild_lock);
@@ -1186,8 +1243,10 @@ vdev_top_transfer(vdev_t *svd, vdev_t *tvd)
 	ASSERT3P(tvd->vdev_indirect_mapping, ==, NULL);
 	ASSERT3P(tvd->vdev_indirect_births, ==, NULL);
 	ASSERT3P(tvd->vdev_obsolete_sm, ==, NULL);
+	ASSERT0(tvd->vdev_noalloc);
 	ASSERT0(tvd->vdev_removing);
 	ASSERT0(tvd->vdev_rebuilding);
+	tvd->vdev_noalloc = svd->vdev_noalloc;
 	tvd->vdev_removing = svd->vdev_removing;
 	tvd->vdev_rebuilding = svd->vdev_rebuilding;
 	tvd->vdev_rebuild_config = svd->vdev_rebuild_config;
@@ -1203,6 +1262,7 @@ vdev_top_transfer(vdev_t *svd, vdev_t *tvd)
 	svd->vdev_indirect_mapping = NULL;
 	svd->vdev_indirect_births = NULL;
 	svd->vdev_obsolete_sm = NULL;
+	svd->vdev_noalloc = 0;
 	svd->vdev_removing = 0;
 	svd->vdev_rebuilding = 0;
 
@@ -1421,7 +1481,7 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 	mspp = vmem_zalloc(newc * sizeof (*mspp), KM_SLEEP);
 
 	if (expanding) {
-		bcopy(vd->vdev_ms, mspp, oldc * sizeof (*mspp));
+		memcpy(mspp, vd->vdev_ms, oldc * sizeof (*mspp));
 		vmem_free(vd->vdev_ms, oldc * sizeof (*mspp));
 	}
 
@@ -1501,11 +1561,15 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 		spa_config_enter(spa, SCL_ALLOC, FTAG, RW_WRITER);
 
 	/*
-	 * If the vdev is being removed we don't activate
-	 * the metaslabs since we want to ensure that no new
-	 * allocations are performed on this device.
+	 * If the vdev is marked as non-allocating then don't
+	 * activate the metaslabs since we want to ensure that
+	 * no allocations are performed on this device.
 	 */
-	if (!expanding && !vd->vdev_removing) {
+	if (vd->vdev_noalloc) {
+		/* track non-allocating vdev space */
+		spa->spa_nonallocating_dspace += spa_deflate(spa) ?
+		    vd->vdev_stat.vs_dspace : vd->vdev_stat.vs_space;
+	} else if (!expanding) {
 		metaslab_group_activate(vd->vdev_mg);
 		if (vd->vdev_log_mg != NULL)
 			metaslab_group_activate(vd->vdev_log_mg);
@@ -1513,13 +1577,6 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 
 	if (txg == 0)
 		spa_config_exit(spa, SCL_ALLOC, FTAG);
-
-	/*
-	 * Regardless whether this vdev was just added or it is being
-	 * expanded, the metaslab count has changed. Recalculate the
-	 * block limit.
-	 */
-	spa_log_sm_set_blocklimit(spa);
 
 	return (0);
 }
@@ -1772,6 +1829,7 @@ vdev_uses_zvols(vdev_t *vd)
 static boolean_t
 vdev_default_open_children_func(vdev_t *vd)
 {
+	(void) vd;
 	return (B_TRUE);
 }
 
@@ -1847,6 +1905,24 @@ vdev_set_deflate_ratio(vdev_t *vd)
 }
 
 /*
+ * Choose the best of two ashifts, preferring one between logical ashift
+ * (absolute minimum) and administrator defined maximum, otherwise take
+ * the biggest of the two.
+ */
+uint64_t
+vdev_best_ashift(uint64_t logical, uint64_t a, uint64_t b)
+{
+	if (a > logical && a <= zfs_vdev_max_auto_ashift) {
+		if (b <= logical || b > zfs_vdev_max_auto_ashift)
+			return (a);
+		else
+			return (MAX(a, b));
+	} else if (b <= logical || b > zfs_vdev_max_auto_ashift)
+		return (MAX(a, b));
+	return (b);
+}
+
+/*
  * Maximize performance by inflating the configured ashift for top level
  * vdevs to be as close to the physical ashift as possible while maintaining
  * administrator defined limits and ensuring it doesn't go below the
@@ -1857,7 +1933,8 @@ vdev_ashift_optimize(vdev_t *vd)
 {
 	ASSERT(vd == vd->vdev_top);
 
-	if (vd->vdev_ashift < vd->vdev_physical_ashift) {
+	if (vd->vdev_ashift < vd->vdev_physical_ashift &&
+	    vd->vdev_physical_ashift <= zfs_vdev_max_auto_ashift) {
 		vd->vdev_ashift = MIN(
 		    MAX(zfs_vdev_max_auto_ashift, vd->vdev_ashift),
 		    MAX(zfs_vdev_min_auto_ashift,
@@ -1922,6 +1999,14 @@ vdev_open(vdev_t *vd)
 
 	error = vd->vdev_ops->vdev_op_open(vd, &osize, &max_osize,
 	    &logical_ashift, &physical_ashift);
+
+	/* Keep the device in removed state if unplugged */
+	if (error == ENOENT && vd->vdev_removed) {
+		vdev_set_state(vd, B_TRUE, VDEV_STATE_REMOVED,
+		    VDEV_AUX_NONE);
+		return (error);
+	}
+
 	/*
 	 * Physical volume size should never be larger than its max size, unless
 	 * the disk has shrunk while we were reading it or the device is buggy
@@ -2855,6 +2940,8 @@ boolean_t
 vdev_default_need_resilver(vdev_t *vd, const dva_t *dva, size_t psize,
     uint64_t phys_birth)
 {
+	(void) dva, (void) psize;
+
 	/* Set by sequential resilver. */
 	if (phys_birth == TXG_UNKNOWN)
 		return (B_TRUE);
@@ -3149,6 +3236,34 @@ vdev_dtl_reassess(vdev_t *vd, uint64_t txg, uint64_t scrub_txg,
 	}
 }
 
+/*
+ * Iterate over all the vdevs except spare, and post kobj events
+ */
+void
+vdev_post_kobj_evt(vdev_t *vd)
+{
+	if (vd->vdev_ops->vdev_op_kobj_evt_post &&
+	    vd->vdev_kobj_flag == B_FALSE) {
+		vd->vdev_kobj_flag = B_TRUE;
+		vd->vdev_ops->vdev_op_kobj_evt_post(vd);
+	}
+
+	for (int c = 0; c < vd->vdev_children; c++)
+		vdev_post_kobj_evt(vd->vdev_child[c]);
+}
+
+/*
+ * Iterate over all the vdevs except spare, and clear kobj events
+ */
+void
+vdev_clear_kobj_evt(vdev_t *vd)
+{
+	vd->vdev_kobj_flag = B_FALSE;
+
+	for (int c = 0; c < vd->vdev_children; c++)
+		vdev_clear_kobj_evt(vd->vdev_child[c]);
+}
+
 int
 vdev_dtl_load(vdev_t *vd)
 {
@@ -3259,6 +3374,12 @@ vdev_construct_zaps(vdev_t *vd, dmu_tx_t *tx)
 			if (vd->vdev_alloc_bias != VDEV_BIAS_NONE)
 				vdev_zap_allocation_data(vd, tx);
 		}
+	}
+	if (vd->vdev_ops == &vdev_root_ops && vd->vdev_root_zap == 0 &&
+	    spa_feature_is_enabled(vd->vdev_spa, SPA_FEATURE_AVZ_V2)) {
+		if (!spa_feature_is_active(vd->vdev_spa, SPA_FEATURE_AVZ_V2))
+			spa_feature_incr(vd->vdev_spa, SPA_FEATURE_AVZ_V2, tx);
+		vd->vdev_root_zap = vdev_create_link_zap(vd, tx);
 	}
 
 	for (uint64_t i = 0; i < vd->vdev_children; i++) {
@@ -3516,6 +3637,26 @@ vdev_load(vdev_t *vd)
 		}
 	}
 
+	if (vd == vd->vdev_top && vd->vdev_top_zap != 0) {
+		spa_t *spa = vd->vdev_spa;
+		uint64_t failfast;
+
+		error = zap_lookup(spa->spa_meta_objset, vd->vdev_top_zap,
+		    vdev_prop_to_name(VDEV_PROP_FAILFAST), sizeof (failfast),
+		    1, &failfast);
+		if (error == 0) {
+			vd->vdev_failfast = failfast & 1;
+		} else if (error == ENOENT) {
+			vd->vdev_failfast = vdev_prop_default_numeric(
+			    VDEV_PROP_FAILFAST);
+		} else {
+			vdev_dbgmsg(vd,
+			    "vdev_load: zap_lookup(top_zap=%llu) "
+			    "failed [error=%d]",
+			    (u_longlong_t)vd->vdev_top_zap, error);
+		}
+	}
+
 	/*
 	 * Load any rebuild state from the top-level vdev zap.
 	 */
@@ -3528,6 +3669,39 @@ vdev_load(vdev_t *vd)
 			    "failed [error=%d]", error);
 			return (error);
 		}
+	}
+
+	if (vd->vdev_top_zap != 0 || vd->vdev_leaf_zap != 0) {
+		uint64_t zapobj;
+
+		if (vd->vdev_top_zap != 0)
+			zapobj = vd->vdev_top_zap;
+		else
+			zapobj = vd->vdev_leaf_zap;
+
+		error = vdev_prop_get_int(vd, VDEV_PROP_CHECKSUM_N,
+		    &vd->vdev_checksum_n);
+		if (error && error != ENOENT)
+			vdev_dbgmsg(vd, "vdev_load: zap_lookup(zap=%llu) "
+			    "failed [error=%d]", (u_longlong_t)zapobj, error);
+
+		error = vdev_prop_get_int(vd, VDEV_PROP_CHECKSUM_T,
+		    &vd->vdev_checksum_t);
+		if (error && error != ENOENT)
+			vdev_dbgmsg(vd, "vdev_load: zap_lookup(zap=%llu) "
+			    "failed [error=%d]", (u_longlong_t)zapobj, error);
+
+		error = vdev_prop_get_int(vd, VDEV_PROP_IO_N,
+		    &vd->vdev_io_n);
+		if (error && error != ENOENT)
+			vdev_dbgmsg(vd, "vdev_load: zap_lookup(zap=%llu) "
+			    "failed [error=%d]", (u_longlong_t)zapobj, error);
+
+		error = vdev_prop_get_int(vd, VDEV_PROP_IO_T,
+		    &vd->vdev_io_t);
+		if (error && error != ENOENT)
+			vdev_dbgmsg(vd, "vdev_load: zap_lookup(zap=%llu) "
+			    "failed [error=%d]", (u_longlong_t)zapobj, error);
 	}
 
 	/*
@@ -3948,6 +4122,29 @@ vdev_degrade(spa_t *spa, uint64_t guid, vdev_aux_t aux)
 	return (spa_vdev_state_exit(spa, vd, 0));
 }
 
+int
+vdev_remove_wanted(spa_t *spa, uint64_t guid)
+{
+	vdev_t *vd;
+
+	spa_vdev_state_enter(spa, SCL_NONE);
+
+	if ((vd = spa_lookup_by_guid(spa, guid, B_TRUE)) == NULL)
+		return (spa_vdev_state_exit(spa, NULL, SET_ERROR(ENODEV)));
+
+	/*
+	 * If the vdev is already removed, then don't do anything.
+	 */
+	if (vd->vdev_removed)
+		return (spa_vdev_state_exit(spa, NULL, 0));
+
+	vd->vdev_remove_wanted = B_TRUE;
+	spa_async_request(spa, SPA_ASYNC_REMOVE);
+
+	return (spa_vdev_state_exit(spa, vd, 0));
+}
+
+
 /*
  * Online the given vdev.
  *
@@ -4035,9 +4232,19 @@ vdev_online(spa_t *spa, uint64_t guid, uint64_t flags, vdev_state_t *newstate)
 
 	if (wasoffline ||
 	    (oldstate < VDEV_STATE_DEGRADED &&
-	    vd->vdev_state >= VDEV_STATE_DEGRADED))
+	    vd->vdev_state >= VDEV_STATE_DEGRADED)) {
 		spa_event_notify(spa, vd, NULL, ESC_ZFS_VDEV_ONLINE);
 
+		/*
+		 * Asynchronously detach spare vdev if resilver or
+		 * rebuild is not required
+		 */
+		if (vd->vdev_unspare &&
+		    !dsl_scan_resilvering(spa->spa_dsl_pool) &&
+		    !dsl_scan_resilver_scheduled(spa->spa_dsl_pool) &&
+		    !vdev_rebuild_active(tvd))
+			spa_async_request(spa, SPA_ASYNC_DETACH_SPARE);
+	}
 	return (spa_vdev_state_exit(spa, vd, 0));
 }
 
@@ -4188,9 +4395,9 @@ vdev_clear(spa_t *spa, vdev_t *vd)
 		vdev_clear(spa, vd->vdev_child[c]);
 
 	/*
-	 * It makes no sense to "clear" an indirect vdev.
+	 * It makes no sense to "clear" an indirect  or removed vdev.
 	 */
-	if (!vdev_is_concrete(vd))
+	if (!vdev_is_concrete(vd) || vd->vdev_removed)
 		return;
 
 	/*
@@ -4330,6 +4537,8 @@ vdev_get_child_stat(vdev_t *cvd, vdev_stat_t *vs, vdev_stat_t *cvs)
 static void
 vdev_get_child_stat_ex(vdev_t *cvd, vdev_stat_ex_t *vsx, vdev_stat_ex_t *cvsx)
 {
+	(void) cvd;
+
 	int t, b;
 	for (t = 0; t < ZIO_TYPES; t++) {
 		for (b = 0; b < ARRAY_SIZE(vsx->vsx_disk_histo[0]); b++)
@@ -4434,12 +4643,13 @@ vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx)
 	vdev_t *tvd = vd->vdev_top;
 	mutex_enter(&vd->vdev_stat_lock);
 	if (vs) {
-		bcopy(&vd->vdev_stat, vs, sizeof (*vs));
+		memcpy(vs, &vd->vdev_stat, sizeof (*vs));
 		vs->vs_timestamp = gethrtime() - vs->vs_timestamp;
 		vs->vs_state = vd->vdev_state;
 		vs->vs_rsize = vdev_get_min_asize(vd);
 
 		if (vd->vdev_ops->vdev_op_leaf) {
+			vs->vs_pspace = vd->vdev_psize;
 			vs->vs_rsize += VDEV_LABEL_START_SIZE +
 			    VDEV_LABEL_END_SIZE;
 			/*
@@ -4485,7 +4695,10 @@ vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx)
 		vs->vs_configured_ashift = vd->vdev_top != NULL
 		    ? vd->vdev_top->vdev_ashift : vd->vdev_ashift;
 		vs->vs_logical_ashift = vd->vdev_logical_ashift;
-		vs->vs_physical_ashift = vd->vdev_physical_ashift;
+		if (vd->vdev_physical_ashift <= ASHIFT_MAX)
+			vs->vs_physical_ashift = vd->vdev_physical_ashift;
+		else
+			vs->vs_physical_ashift = 0;
 
 		/*
 		 * Report fragmentation and rebuild progress for top-level,
@@ -4502,6 +4715,8 @@ vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx)
 			vs->vs_fragmentation = (vd->vdev_mg != NULL) ?
 			    vd->vdev_mg->mg_fragmentation : 0;
 		}
+		vs->vs_noalloc = MAX(vd->vdev_noalloc,
+		    tvd ? tvd->vdev_noalloc : 0);
 	}
 
 	vdev_get_stats_ex_impl(vd, vs, vsx);
@@ -4545,8 +4760,14 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 	vdev_t *vd = zio->io_vd ? zio->io_vd : rvd;
 	vdev_t *pvd;
 	uint64_t txg = zio->io_txg;
+/* Suppress ASAN false positive */
+#ifdef __SANITIZE_ADDRESS__
+	vdev_stat_t *vs = vd ? &vd->vdev_stat : NULL;
+	vdev_stat_ex_t *vsx = vd ? &vd->vdev_stat_ex : NULL;
+#else
 	vdev_stat_t *vs = &vd->vdev_stat;
 	vdev_stat_ex_t *vsx = &vd->vdev_stat_ex;
+#endif
 	zio_type_t type = zio->io_type;
 	int flags = zio->io_flags;
 
@@ -4763,6 +4984,7 @@ void
 vdev_space_update(vdev_t *vd, int64_t alloc_delta, int64_t defer_delta,
     int64_t space_delta)
 {
+	(void) defer_delta;
 	int64_t dspace_delta;
 	spa_t *spa = vd->vdev_spa;
 	vdev_t *rvd = spa->spa_root_vdev;
@@ -5242,8 +5464,12 @@ vdev_split(vdev_t *vd)
 {
 	vdev_t *cvd, *pvd = vd->vdev_parent;
 
+	VERIFY3U(pvd->vdev_children, >, 1);
+
 	vdev_remove_child(pvd, vd);
 	vdev_compact_children(pvd);
+
+	ASSERT3P(pvd->vdev_child, !=, NULL);
 
 	cvd = pvd->vdev_child[0];
 	if (pvd->vdev_children == 1) {
@@ -5254,7 +5480,7 @@ vdev_split(vdev_t *vd)
 }
 
 void
-vdev_deadman(vdev_t *vd, char *tag)
+vdev_deadman(vdev_t *vd, const char *tag)
 {
 	for (int c = 0; c < vd->vdev_children; c++) {
 		vdev_t *cvd = vd->vdev_child[c];
@@ -5410,6 +5636,23 @@ vdev_xlate_walk(vdev_t *vd, const range_seg64_t *logical_rs,
 	}
 }
 
+static char *
+vdev_name(vdev_t *vd, char *buf, int buflen)
+{
+	if (vd->vdev_path == NULL) {
+		if (strcmp(vd->vdev_ops->vdev_op_type, "root") == 0) {
+			strlcpy(buf, vd->vdev_spa->spa_name, buflen);
+		} else if (!vd->vdev_ops->vdev_op_leaf) {
+			snprintf(buf, buflen, "%s-%llu",
+			    vd->vdev_ops->vdev_op_type,
+			    (u_longlong_t)vd->vdev_id);
+		}
+	} else {
+		strlcpy(buf, vd->vdev_path, buflen);
+	}
+	return (buf);
+}
+
 /*
  * Look at the vdev tree and determine whether any devices are currently being
  * replaced.
@@ -5439,31 +5682,699 @@ vdev_replace_in_progress(vdev_t *vdev)
 	return (B_FALSE);
 }
 
+/*
+ * Add a (source=src, propname=propval) list to an nvlist.
+ */
+static void
+vdev_prop_add_list(nvlist_t *nvl, const char *propname, const char *strval,
+    uint64_t intval, zprop_source_t src)
+{
+	nvlist_t *propval;
+
+	propval = fnvlist_alloc();
+	fnvlist_add_uint64(propval, ZPROP_SOURCE, src);
+
+	if (strval != NULL)
+		fnvlist_add_string(propval, ZPROP_VALUE, strval);
+	else
+		fnvlist_add_uint64(propval, ZPROP_VALUE, intval);
+
+	fnvlist_add_nvlist(nvl, propname, propval);
+	nvlist_free(propval);
+}
+
+static void
+vdev_props_set_sync(void *arg, dmu_tx_t *tx)
+{
+	vdev_t *vd;
+	nvlist_t *nvp = arg;
+	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	objset_t *mos = spa->spa_meta_objset;
+	nvpair_t *elem = NULL;
+	uint64_t vdev_guid;
+	nvlist_t *nvprops;
+
+	vdev_guid = fnvlist_lookup_uint64(nvp, ZPOOL_VDEV_PROPS_SET_VDEV);
+	nvprops = fnvlist_lookup_nvlist(nvp, ZPOOL_VDEV_PROPS_SET_PROPS);
+	vd = spa_lookup_by_guid(spa, vdev_guid, B_TRUE);
+
+	/* this vdev could get removed while waiting for this sync task */
+	if (vd == NULL)
+		return;
+
+	mutex_enter(&spa->spa_props_lock);
+
+	while ((elem = nvlist_next_nvpair(nvprops, elem)) != NULL) {
+		uint64_t intval, objid = 0;
+		const char *strval;
+		vdev_prop_t prop;
+		const char *propname = nvpair_name(elem);
+		zprop_type_t proptype;
+
+		/*
+		 * Set vdev property values in the vdev props mos object.
+		 */
+		if (vd->vdev_root_zap != 0) {
+			objid = vd->vdev_root_zap;
+		} else if (vd->vdev_top_zap != 0) {
+			objid = vd->vdev_top_zap;
+		} else if (vd->vdev_leaf_zap != 0) {
+			objid = vd->vdev_leaf_zap;
+		} else {
+			/*
+			 * XXX: implement vdev_props_set_check()
+			 */
+			panic("vdev not root/top/leaf");
+		}
+
+		switch (prop = vdev_name_to_prop(propname)) {
+		case VDEV_PROP_USERPROP:
+			if (vdev_prop_user(propname)) {
+				strval = fnvpair_value_string(elem);
+				if (strlen(strval) == 0) {
+					/* remove the property if value == "" */
+					(void) zap_remove(mos, objid, propname,
+					    tx);
+				} else {
+					VERIFY0(zap_update(mos, objid, propname,
+					    1, strlen(strval) + 1, strval, tx));
+				}
+				spa_history_log_internal(spa, "vdev set", tx,
+				    "vdev_guid=%llu: %s=%s",
+				    (u_longlong_t)vdev_guid, nvpair_name(elem),
+				    strval);
+			}
+			break;
+		default:
+			/* normalize the property name */
+			propname = vdev_prop_to_name(prop);
+			proptype = vdev_prop_get_type(prop);
+
+			if (nvpair_type(elem) == DATA_TYPE_STRING) {
+				ASSERT(proptype == PROP_TYPE_STRING);
+				strval = fnvpair_value_string(elem);
+				VERIFY0(zap_update(mos, objid, propname,
+				    1, strlen(strval) + 1, strval, tx));
+				spa_history_log_internal(spa, "vdev set", tx,
+				    "vdev_guid=%llu: %s=%s",
+				    (u_longlong_t)vdev_guid, nvpair_name(elem),
+				    strval);
+			} else if (nvpair_type(elem) == DATA_TYPE_UINT64) {
+				intval = fnvpair_value_uint64(elem);
+
+				if (proptype == PROP_TYPE_INDEX) {
+					const char *unused;
+					VERIFY0(vdev_prop_index_to_string(
+					    prop, intval, &unused));
+				}
+				VERIFY0(zap_update(mos, objid, propname,
+				    sizeof (uint64_t), 1, &intval, tx));
+				spa_history_log_internal(spa, "vdev set", tx,
+				    "vdev_guid=%llu: %s=%lld",
+				    (u_longlong_t)vdev_guid,
+				    nvpair_name(elem), (longlong_t)intval);
+			} else {
+				panic("invalid vdev property type %u",
+				    nvpair_type(elem));
+			}
+		}
+
+	}
+
+	mutex_exit(&spa->spa_props_lock);
+}
+
+int
+vdev_prop_set(vdev_t *vd, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	spa_t *spa = vd->vdev_spa;
+	nvpair_t *elem = NULL;
+	uint64_t vdev_guid;
+	nvlist_t *nvprops;
+	int error = 0;
+
+	ASSERT(vd != NULL);
+
+	if (nvlist_lookup_uint64(innvl, ZPOOL_VDEV_PROPS_SET_VDEV,
+	    &vdev_guid) != 0)
+		return (SET_ERROR(EINVAL));
+
+	if (nvlist_lookup_nvlist(innvl, ZPOOL_VDEV_PROPS_SET_PROPS,
+	    &nvprops) != 0)
+		return (SET_ERROR(EINVAL));
+
+	if ((vd = spa_lookup_by_guid(spa, vdev_guid, B_TRUE)) == NULL)
+		return (SET_ERROR(EINVAL));
+
+	while ((elem = nvlist_next_nvpair(nvprops, elem)) != NULL) {
+		const char *propname = nvpair_name(elem);
+		vdev_prop_t prop = vdev_name_to_prop(propname);
+		uint64_t intval = 0;
+		const char *strval = NULL;
+
+		if (prop == VDEV_PROP_USERPROP && !vdev_prop_user(propname)) {
+			error = EINVAL;
+			goto end;
+		}
+
+		if (vdev_prop_readonly(prop)) {
+			error = EROFS;
+			goto end;
+		}
+
+		/* Special Processing */
+		switch (prop) {
+		case VDEV_PROP_PATH:
+			if (vd->vdev_path == NULL) {
+				error = EROFS;
+				break;
+			}
+			if (nvpair_value_string(elem, &strval) != 0) {
+				error = EINVAL;
+				break;
+			}
+			/* New path must start with /dev/ */
+			if (strncmp(strval, "/dev/", 5)) {
+				error = EINVAL;
+				break;
+			}
+			error = spa_vdev_setpath(spa, vdev_guid, strval);
+			break;
+		case VDEV_PROP_ALLOCATING:
+			if (nvpair_value_uint64(elem, &intval) != 0) {
+				error = EINVAL;
+				break;
+			}
+			if (intval != vd->vdev_noalloc)
+				break;
+			if (intval == 0)
+				error = spa_vdev_noalloc(spa, vdev_guid);
+			else
+				error = spa_vdev_alloc(spa, vdev_guid);
+			break;
+		case VDEV_PROP_FAILFAST:
+			if (nvpair_value_uint64(elem, &intval) != 0) {
+				error = EINVAL;
+				break;
+			}
+			vd->vdev_failfast = intval & 1;
+			break;
+		case VDEV_PROP_CHECKSUM_N:
+			if (nvpair_value_uint64(elem, &intval) != 0) {
+				error = EINVAL;
+				break;
+			}
+			vd->vdev_checksum_n = intval;
+			break;
+		case VDEV_PROP_CHECKSUM_T:
+			if (nvpair_value_uint64(elem, &intval) != 0) {
+				error = EINVAL;
+				break;
+			}
+			vd->vdev_checksum_t = intval;
+			break;
+		case VDEV_PROP_IO_N:
+			if (nvpair_value_uint64(elem, &intval) != 0) {
+				error = EINVAL;
+				break;
+			}
+			vd->vdev_io_n = intval;
+			break;
+		case VDEV_PROP_IO_T:
+			if (nvpair_value_uint64(elem, &intval) != 0) {
+				error = EINVAL;
+				break;
+			}
+			vd->vdev_io_t = intval;
+			break;
+		default:
+			/* Most processing is done in vdev_props_set_sync */
+			break;
+		}
+end:
+		if (error != 0) {
+			intval = error;
+			vdev_prop_add_list(outnvl, propname, strval, intval, 0);
+			return (error);
+		}
+	}
+
+	return (dsl_sync_task(spa->spa_name, NULL, vdev_props_set_sync,
+	    innvl, 6, ZFS_SPACE_CHECK_EXTRA_RESERVED));
+}
+
+int
+vdev_prop_get(vdev_t *vd, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	spa_t *spa = vd->vdev_spa;
+	objset_t *mos = spa->spa_meta_objset;
+	int err = 0;
+	uint64_t objid;
+	uint64_t vdev_guid;
+	nvpair_t *elem = NULL;
+	nvlist_t *nvprops = NULL;
+	uint64_t intval = 0;
+	char *strval = NULL;
+	const char *propname = NULL;
+	vdev_prop_t prop;
+
+	ASSERT(vd != NULL);
+	ASSERT(mos != NULL);
+
+	if (nvlist_lookup_uint64(innvl, ZPOOL_VDEV_PROPS_GET_VDEV,
+	    &vdev_guid) != 0)
+		return (SET_ERROR(EINVAL));
+
+	nvlist_lookup_nvlist(innvl, ZPOOL_VDEV_PROPS_GET_PROPS, &nvprops);
+
+	if (vd->vdev_root_zap != 0) {
+		objid = vd->vdev_root_zap;
+	} else if (vd->vdev_top_zap != 0) {
+		objid = vd->vdev_top_zap;
+	} else if (vd->vdev_leaf_zap != 0) {
+		objid = vd->vdev_leaf_zap;
+	} else {
+		return (SET_ERROR(EINVAL));
+	}
+	ASSERT(objid != 0);
+
+	mutex_enter(&spa->spa_props_lock);
+
+	if (nvprops != NULL) {
+		char namebuf[64] = { 0 };
+
+		while ((elem = nvlist_next_nvpair(nvprops, elem)) != NULL) {
+			intval = 0;
+			strval = NULL;
+			propname = nvpair_name(elem);
+			prop = vdev_name_to_prop(propname);
+			zprop_source_t src = ZPROP_SRC_DEFAULT;
+			uint64_t integer_size, num_integers;
+
+			switch (prop) {
+			/* Special Read-only Properties */
+			case VDEV_PROP_NAME:
+				strval = vdev_name(vd, namebuf,
+				    sizeof (namebuf));
+				if (strval == NULL)
+					continue;
+				vdev_prop_add_list(outnvl, propname, strval, 0,
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_CAPACITY:
+				/* percent used */
+				intval = (vd->vdev_stat.vs_dspace == 0) ? 0 :
+				    (vd->vdev_stat.vs_alloc * 100 /
+				    vd->vdev_stat.vs_dspace);
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    intval, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_STATE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_state, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_GUID:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_guid, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_ASIZE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_asize, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_PSIZE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_psize, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_ASHIFT:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_ashift, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_SIZE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_dspace, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_FREE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_dspace -
+				    vd->vdev_stat.vs_alloc, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_ALLOCATED:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_alloc, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_EXPANDSZ:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_esize, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_FRAGMENTATION:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_fragmentation,
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_PARITY:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vdev_get_nparity(vd), ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_PATH:
+				if (vd->vdev_path == NULL)
+					continue;
+				vdev_prop_add_list(outnvl, propname,
+				    vd->vdev_path, 0, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_DEVID:
+				if (vd->vdev_devid == NULL)
+					continue;
+				vdev_prop_add_list(outnvl, propname,
+				    vd->vdev_devid, 0, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_PHYS_PATH:
+				if (vd->vdev_physpath == NULL)
+					continue;
+				vdev_prop_add_list(outnvl, propname,
+				    vd->vdev_physpath, 0, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_ENC_PATH:
+				if (vd->vdev_enc_sysfs_path == NULL)
+					continue;
+				vdev_prop_add_list(outnvl, propname,
+				    vd->vdev_enc_sysfs_path, 0, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_FRU:
+				if (vd->vdev_fru == NULL)
+					continue;
+				vdev_prop_add_list(outnvl, propname,
+				    vd->vdev_fru, 0, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_PARENT:
+				if (vd->vdev_parent != NULL) {
+					strval = vdev_name(vd->vdev_parent,
+					    namebuf, sizeof (namebuf));
+					vdev_prop_add_list(outnvl, propname,
+					    strval, 0, ZPROP_SRC_NONE);
+				}
+				continue;
+			case VDEV_PROP_CHILDREN:
+				if (vd->vdev_children > 0)
+					strval = kmem_zalloc(ZAP_MAXVALUELEN,
+					    KM_SLEEP);
+				for (uint64_t i = 0; i < vd->vdev_children;
+				    i++) {
+					const char *vname;
+
+					vname = vdev_name(vd->vdev_child[i],
+					    namebuf, sizeof (namebuf));
+					if (vname == NULL)
+						vname = "(unknown)";
+					if (strlen(strval) > 0)
+						strlcat(strval, ",",
+						    ZAP_MAXVALUELEN);
+					strlcat(strval, vname, ZAP_MAXVALUELEN);
+				}
+				if (strval != NULL) {
+					vdev_prop_add_list(outnvl, propname,
+					    strval, 0, ZPROP_SRC_NONE);
+					kmem_free(strval, ZAP_MAXVALUELEN);
+				}
+				continue;
+			case VDEV_PROP_NUMCHILDREN:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_children, ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_READ_ERRORS:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_read_errors,
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_WRITE_ERRORS:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_write_errors,
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_CHECKSUM_ERRORS:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_checksum_errors,
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_INITIALIZE_ERRORS:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_initialize_errors,
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_OPS_NULL:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_ops[ZIO_TYPE_NULL],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_OPS_READ:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_ops[ZIO_TYPE_READ],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_OPS_WRITE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_ops[ZIO_TYPE_WRITE],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_OPS_FREE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_ops[ZIO_TYPE_FREE],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_OPS_CLAIM:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_ops[ZIO_TYPE_CLAIM],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_OPS_TRIM:
+				/*
+				 * TRIM ops and bytes are reported to user
+				 * space as ZIO_TYPE_IOCTL.  This is done to
+				 * preserve the vdev_stat_t structure layout
+				 * for user space.
+				 */
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_ops[ZIO_TYPE_IOCTL],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_BYTES_NULL:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_bytes[ZIO_TYPE_NULL],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_BYTES_READ:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_bytes[ZIO_TYPE_READ],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_BYTES_WRITE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_bytes[ZIO_TYPE_WRITE],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_BYTES_FREE:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_bytes[ZIO_TYPE_FREE],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_BYTES_CLAIM:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_bytes[ZIO_TYPE_CLAIM],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_BYTES_TRIM:
+				/*
+				 * TRIM ops and bytes are reported to user
+				 * space as ZIO_TYPE_IOCTL.  This is done to
+				 * preserve the vdev_stat_t structure layout
+				 * for user space.
+				 */
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_stat.vs_bytes[ZIO_TYPE_IOCTL],
+				    ZPROP_SRC_NONE);
+				continue;
+			case VDEV_PROP_REMOVING:
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    vd->vdev_removing, ZPROP_SRC_NONE);
+				continue;
+			/* Numeric Properites */
+			case VDEV_PROP_ALLOCATING:
+				/* Leaf vdevs cannot have this property */
+				if (vd->vdev_mg == NULL &&
+				    vd->vdev_top != NULL) {
+					src = ZPROP_SRC_NONE;
+					intval = ZPROP_BOOLEAN_NA;
+				} else {
+					err = vdev_prop_get_int(vd, prop,
+					    &intval);
+					if (err && err != ENOENT)
+						break;
+
+					if (intval ==
+					    vdev_prop_default_numeric(prop))
+						src = ZPROP_SRC_DEFAULT;
+					else
+						src = ZPROP_SRC_LOCAL;
+				}
+
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    intval, src);
+				break;
+			case VDEV_PROP_FAILFAST:
+				src = ZPROP_SRC_LOCAL;
+				strval = NULL;
+
+				err = zap_lookup(mos, objid, nvpair_name(elem),
+				    sizeof (uint64_t), 1, &intval);
+				if (err == ENOENT) {
+					intval = vdev_prop_default_numeric(
+					    prop);
+					err = 0;
+				} else if (err) {
+					break;
+				}
+				if (intval == vdev_prop_default_numeric(prop))
+					src = ZPROP_SRC_DEFAULT;
+
+				vdev_prop_add_list(outnvl, propname, strval,
+				    intval, src);
+				break;
+			case VDEV_PROP_CHECKSUM_N:
+			case VDEV_PROP_CHECKSUM_T:
+			case VDEV_PROP_IO_N:
+			case VDEV_PROP_IO_T:
+				err = vdev_prop_get_int(vd, prop, &intval);
+				if (err && err != ENOENT)
+					break;
+
+				if (intval == vdev_prop_default_numeric(prop))
+					src = ZPROP_SRC_DEFAULT;
+				else
+					src = ZPROP_SRC_LOCAL;
+
+				vdev_prop_add_list(outnvl, propname, NULL,
+				    intval, src);
+				break;
+			/* Text Properties */
+			case VDEV_PROP_COMMENT:
+				/* Exists in the ZAP below */
+				/* FALLTHRU */
+			case VDEV_PROP_USERPROP:
+				/* User Properites */
+				src = ZPROP_SRC_LOCAL;
+
+				err = zap_length(mos, objid, nvpair_name(elem),
+				    &integer_size, &num_integers);
+				if (err)
+					break;
+
+				switch (integer_size) {
+				case 8:
+					/* User properties cannot be integers */
+					err = EINVAL;
+					break;
+				case 1:
+					/* string property */
+					strval = kmem_alloc(num_integers,
+					    KM_SLEEP);
+					err = zap_lookup(mos, objid,
+					    nvpair_name(elem), 1,
+					    num_integers, strval);
+					if (err) {
+						kmem_free(strval,
+						    num_integers);
+						break;
+					}
+					vdev_prop_add_list(outnvl, propname,
+					    strval, 0, src);
+					kmem_free(strval, num_integers);
+					break;
+				}
+				break;
+			default:
+				err = ENOENT;
+				break;
+			}
+			if (err)
+				break;
+		}
+	} else {
+		/*
+		 * Get all properties from the MOS vdev property object.
+		 */
+		zap_cursor_t zc;
+		zap_attribute_t za;
+		for (zap_cursor_init(&zc, mos, objid);
+		    (err = zap_cursor_retrieve(&zc, &za)) == 0;
+		    zap_cursor_advance(&zc)) {
+			intval = 0;
+			strval = NULL;
+			zprop_source_t src = ZPROP_SRC_DEFAULT;
+			propname = za.za_name;
+
+			switch (za.za_integer_length) {
+			case 8:
+				/* We do not allow integer user properties */
+				/* This is likely an internal value */
+				break;
+			case 1:
+				/* string property */
+				strval = kmem_alloc(za.za_num_integers,
+				    KM_SLEEP);
+				err = zap_lookup(mos, objid, za.za_name, 1,
+				    za.za_num_integers, strval);
+				if (err) {
+					kmem_free(strval, za.za_num_integers);
+					break;
+				}
+				vdev_prop_add_list(outnvl, propname, strval, 0,
+				    src);
+				kmem_free(strval, za.za_num_integers);
+				break;
+
+			default:
+				break;
+			}
+		}
+		zap_cursor_fini(&zc);
+	}
+
+	mutex_exit(&spa->spa_props_lock);
+	if (err && err != ENOENT) {
+		return (err);
+	}
+
+	return (0);
+}
+
 EXPORT_SYMBOL(vdev_fault);
 EXPORT_SYMBOL(vdev_degrade);
 EXPORT_SYMBOL(vdev_online);
 EXPORT_SYMBOL(vdev_offline);
 EXPORT_SYMBOL(vdev_clear);
 
-/* BEGIN CSTYLED */
-ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, default_ms_count, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, default_ms_count, UINT, ZMOD_RW,
 	"Target number of metaslabs per top-level vdev");
 
-ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, default_ms_shift, INT, ZMOD_RW,
-	"Default limit for metaslab size");
+ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, default_ms_shift, UINT, ZMOD_RW,
+	"Default lower limit for metaslab size");
 
-ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, min_ms_count, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, max_ms_shift, UINT, ZMOD_RW,
+	"Default upper limit for metaslab size");
+
+ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, min_ms_count, UINT, ZMOD_RW,
 	"Minimum number of metaslabs per top-level vdev");
 
-ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, ms_count_limit, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, ms_count_limit, UINT, ZMOD_RW,
 	"Practical upper limit of total metaslabs per top-level vdev");
 
 ZFS_MODULE_PARAM(zfs, zfs_, slow_io_events_per_second, UINT, ZMOD_RW,
 	"Rate limit slow IO (delay) events to this many per second");
 
+/* BEGIN CSTYLED */
 ZFS_MODULE_PARAM(zfs, zfs_, checksum_events_per_second, UINT, ZMOD_RW,
 	"Rate limit checksum events to this many checksum errors per second "
-	"(do not set below zed threshold).");
+	"(do not set below ZED threshold).");
+/* END CSTYLED */
 
 ZFS_MODULE_PARAM(zfs, zfs_, scan_ignore_errors, INT, ZMOD_RW,
 	"Ignore errors during resilver/scrub");
@@ -5474,15 +6385,16 @@ ZFS_MODULE_PARAM(zfs_vdev, vdev_, validate_skip, INT, ZMOD_RW,
 ZFS_MODULE_PARAM(zfs, zfs_, nocacheflush, INT, ZMOD_RW,
 	"Disable cache flushes");
 
-ZFS_MODULE_PARAM(zfs, zfs_, embedded_slog_min_ms, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs, zfs_, embedded_slog_min_ms, UINT, ZMOD_RW,
 	"Minimum number of metaslabs required to dedicate one for log blocks");
 
+/* BEGIN CSTYLED */
 ZFS_MODULE_PARAM_CALL(zfs_vdev, zfs_vdev_, min_auto_ashift,
-	param_set_min_auto_ashift, param_get_ulong, ZMOD_RW,
+	param_set_min_auto_ashift, param_get_uint, ZMOD_RW,
 	"Minimum ashift used when creating new top-level vdevs");
 
 ZFS_MODULE_PARAM_CALL(zfs_vdev, zfs_vdev_, max_auto_ashift,
-	param_set_max_auto_ashift, param_get_ulong, ZMOD_RW,
+	param_set_max_auto_ashift, param_get_uint, ZMOD_RW,
 	"Maximum ashift used when optimizing for logical -> physical sector "
 	"size on new top-level vdevs");
 /* END CSTYLED */

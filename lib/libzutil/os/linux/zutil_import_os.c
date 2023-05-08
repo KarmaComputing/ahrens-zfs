@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -168,9 +168,9 @@ zpool_open_func(void *arg)
 	 * Add additional entries for paths described by this label.
 	 */
 	if (rn->rn_labelpaths) {
-		char *path = NULL;
-		char *devid = NULL;
-		char *env = NULL;
+		const char *path = NULL;
+		const char *devid = NULL;
+		const char *env = NULL;
 		rdsk_node_t *slice;
 		avl_index_t where;
 		int timeout;
@@ -264,36 +264,36 @@ zpool_default_search_paths(size_t *count)
  * index in the passed 'order' variable, otherwise return an error.
  */
 static int
-zfs_path_order(char *name, int *order)
+zfs_path_order(const char *name, int *order)
 {
-	int i, error = ENOENT;
-	char *dir, *env, *envdup, *tmp = NULL;
+	const char *env = getenv("ZPOOL_IMPORT_PATH");
 
-	env = getenv("ZPOOL_IMPORT_PATH");
 	if (env) {
-		envdup = strdup(env);
-		for (dir = strtok_r(envdup, ":", &tmp), i = 0;
-		    dir != NULL;
-		    dir = strtok_r(NULL, ":", &tmp), i++) {
-			if (strncmp(name, dir, strlen(dir)) == 0) {
-				*order = i;
-				error = 0;
+		for (int i = 0; ; ++i) {
+			env += strspn(env, ":");
+			size_t dirlen = strcspn(env, ":");
+			if (dirlen) {
+				if (strncmp(name, env, dirlen) == 0) {
+					*order = i;
+					return (0);
+				}
+
+				env += dirlen;
+			} else
 				break;
-			}
 		}
-		free(envdup);
 	} else {
-		for (i = 0; i < ARRAY_SIZE(zpool_default_import_path); i++) {
+		for (int i = 0; i < ARRAY_SIZE(zpool_default_import_path);
+		    ++i) {
 			if (strncmp(name, zpool_default_import_path[i],
 			    strlen(zpool_default_import_path[i])) == 0) {
 				*order = i;
-				error = 0;
-				break;
+				return (0);
 			}
 		}
 	}
 
-	return (error);
+	return (ENOENT);
 }
 
 /*
@@ -328,7 +328,9 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 		return (EINVAL);
 	}
 
-	error = blkid_dev_set_search(iter, "TYPE", "zfs_member");
+	/* Only const char *s since 2.32 */
+	error = blkid_dev_set_search(iter,
+	    (char *)"TYPE", (char *)"zfs_member");
 	if (error != 0) {
 		blkid_dev_iterate_end(iter);
 		blkid_put_cache(cache);
@@ -560,17 +562,17 @@ udev_device_is_ready(struct udev_device *dev)
 
 #else
 
-/* ARGSUSED */
 int
 zfs_device_get_devid(struct udev_device *dev, char *bufptr, size_t buflen)
 {
+	(void) dev, (void) bufptr, (void) buflen;
 	return (ENODATA);
 }
 
-/* ARGSUSED */
 int
 zfs_device_get_physical(struct udev_device *dev, char *bufptr, size_t buflen)
 {
+	(void) dev, (void) bufptr, (void) buflen;
 	return (ENODATA);
 }
 
@@ -754,6 +756,9 @@ no_dev:
 
 	return (ret);
 #else
+	(void) path;
+	(void) ds;
+	(void) wholedisk;
 	return (ENOENT);
 #endif
 }
@@ -764,7 +769,7 @@ no_dev:
  *    vdev_enc_sysfs_path: '/sys/class/enclosure/11:0:1:0/SLOT 4'
  */
 static void
-update_vdev_config_dev_sysfs_path(nvlist_t *nv, char *path)
+update_vdev_config_dev_sysfs_path(nvlist_t *nv, const char *path)
 {
 	char *upath, *spath;
 
@@ -788,7 +793,9 @@ update_vdev_config_dev_sysfs_path(nvlist_t *nv, char *path)
 static int
 sysfs_path_pool_vdev_iter_f(void *hdl_data, nvlist_t *nv, void *data)
 {
-	char *path = NULL;
+	(void) hdl_data, (void) data;
+
+	const char *path = NULL;
 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) != 0)
 		return (1);
 
@@ -834,7 +841,7 @@ void
 update_vdev_config_dev_strs(nvlist_t *nv)
 {
 	vdev_dev_strs_t vds;
-	char *env, *type, *path;
+	const char *env, *type, *path;
 	uint64_t wholedisk = 0;
 
 	/*

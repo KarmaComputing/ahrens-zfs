@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -34,6 +34,7 @@
 #include <sys/systm.h>
 #include <sys/sysmacros.h>
 #include <sys/resource.h>
+#include <sys/resourcevar.h>
 #include <sys/mntent.h>
 #include <sys/u8_textprep.h>
 #include <sys/dsl_dataset.h>
@@ -153,13 +154,16 @@ zfs_znode_cache_constructor(void *buf, void *arg, int kmflags)
 	zp->z_xattr_cached = NULL;
 	zp->z_xattr_parent = 0;
 	zp->z_vnode = NULL;
+	zp->z_sync_writes_cnt = 0;
+	zp->z_async_writes_cnt = 0;
+
 	return (0);
 }
 
-/*ARGSUSED*/
 static void
 zfs_znode_cache_destructor(void *buf, void *arg)
 {
+	(void) arg;
 	znode_t *zp = buf;
 
 	ASSERT(!POINTER_IS_VALID(zp->z_zfsvfs));
@@ -172,6 +176,9 @@ zfs_znode_cache_destructor(void *buf, void *arg)
 
 	ASSERT3P(zp->z_acl_cached, ==, NULL);
 	ASSERT3P(zp->z_xattr_cached, ==, NULL);
+
+	ASSERT0(atomic_load_32(&zp->z_sync_writes_cnt));
+	ASSERT0(atomic_load_32(&zp->z_async_writes_cnt));
 }
 
 
@@ -292,7 +299,7 @@ zfs_create_share_dir(zfsvfs_t *zfsvfs, dmu_tx_t *tx)
 	sharezp->z_is_sa = zfsvfs->z_use_sa;
 
 	VERIFY0(zfs_acl_ids_create(sharezp, IS_ROOT_NODE, &vattr,
-	    kcred, NULL, &acl_ids));
+	    kcred, NULL, &acl_ids, NULL));
 	zfs_mknode(sharezp, &vattr, tx, kcred, IS_ROOT_NODE, &zp, &acl_ids);
 	ASSERT3P(zp, ==, sharezp);
 	POINTER_INVALIDATE(&sharezp->z_zfsvfs);
@@ -380,7 +387,6 @@ void
 zfs_znode_dmu_fini(znode_t *zp)
 {
 	ASSERT(MUTEX_HELD(ZFS_OBJ_MUTEX(zp->z_zfsvfs, zp->z_id)) ||
-	    zp->z_unlinked ||
 	    ZFS_TEARDOWN_INACTIVE_WRITE_HELD(zp->z_zfsvfs));
 
 	sa_handle_destroy(zp->z_sa_hdl);
@@ -443,6 +449,13 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 	zp->z_vnode = vp;
 	vp->v_data = zp;
 
+	/*
+	 * Acquire the vnode lock before any possible interaction with the
+	 * outside world.  Specifically, there is an error path that calls
+	 * zfs_vnode_forget() and the vnode should be exclusively locked.
+	 */
+	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
+
 	ASSERT(!POINTER_IS_VALID(zp->z_zfsvfs));
 
 	zp->z_sa_hdl = NULL;
@@ -453,11 +466,11 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 	zp->z_blksz = blksz;
 	zp->z_seq = 0x7A4653;
 	zp->z_sync_cnt = 0;
+	zp->z_sync_writes_cnt = 0;
+	zp->z_async_writes_cnt = 0;
 #if __FreeBSD_version >= 1300139
 	atomic_store_ptr(&zp->z_cached_symlink, NULL);
 #endif
-
-	vp = ZTOV(zp);
 
 	zfs_znode_sa_init(zfsvfs, zp, db, obj_type, hdl);
 
@@ -528,10 +541,9 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 	zp->z_zfsvfs = zfsvfs;
 	mutex_exit(&zfsvfs->z_znodes_lock);
 
-	/*
-	 * Acquire vnode lock before making it available to the world.
-	 */
-	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
+#if __FreeBSD_version >= 1400077
+	vn_set_state(vp, VSTATE_CONSTRUCTED);
+#endif
 	VN_LOCK_AREC(vp);
 	if (vp->v_type != VFIFO)
 		VN_LOCK_ASHARE(vp);
@@ -571,7 +583,6 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 	dmu_buf_t	*db;
 	timestruc_t	now;
 	uint64_t	gen, obj;
-	int		err;
 	int		bonuslen;
 	int		dnodesize;
 	sa_handle_t	*sa_hdl;
@@ -811,12 +822,11 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 		VERIFY0(zfs_aclset_common(*zpp, acl_ids->z_aclp, cr, tx));
 	}
 	if (!(flag & IS_ROOT_NODE)) {
-		vnode_t *vp;
-
-		vp = ZTOV(*zpp);
+		vnode_t *vp = ZTOV(*zpp);
 		vp->v_vflag |= VV_FORCEINSMQ;
-		err = insmntque(vp, zfsvfs->z_vfs);
+		int err = insmntque(vp, zfsvfs->z_vfs);
 		vp->v_vflag &= ~VV_FORCEINSMQ;
+		(void) err;
 		KASSERT(err == 0, ("insmntque() failed: error %d", err));
 	}
 	kmem_free(sa_attrs, sizeof (sa_bulk_attr_t) * ZPL_END);
@@ -835,7 +845,9 @@ zfs_xvattr_set(znode_t *zp, xvattr_t *xvap, dmu_tx_t *tx)
 	xoap = xva_getxoptattr(xvap);
 	ASSERT3P(xoap, !=, NULL);
 
-	ASSERT_VOP_IN_SEQC(ZTOV(zp));
+	if (zp->z_zfsvfs->z_replay == B_FALSE) {
+		ASSERT_VOP_IN_SEQC(ZTOV(zp));
+	}
 
 	if (XVA_ISSET_REQ(xvap, XAT_CREATETIME)) {
 		uint64_t times[2];
@@ -928,11 +940,9 @@ zfs_zget(zfsvfs_t *zfsvfs, uint64_t obj_num, znode_t **zpp)
 	znode_t		*zp;
 	vnode_t		*vp;
 	sa_handle_t	*hdl;
-	struct thread	*td;
 	int locked;
 	int err;
 
-	td = curthread;
 	getnewvnode_reserve_();
 again:
 	*zpp = NULL;
@@ -958,7 +968,7 @@ again:
 
 	hdl = dmu_buf_get_user(db);
 	if (hdl != NULL) {
-		zp  = sa_get_userdata(hdl);
+		zp = sa_get_userdata(hdl);
 
 		/*
 		 * Since "SA" does immediate eviction we
@@ -1079,9 +1089,18 @@ zfs_rezget(znode_t *zp)
 	 * the vnode in case of error, but currently we cannot do that
 	 * because of the LOR between the vnode lock and z_teardown_lock.
 	 * So, instead, we have to "doom" the znode in the illumos style.
+	 *
+	 * Ignore invalid pages during the scan.  This is to avoid deadlocks
+	 * between page busying and the teardown lock, as pages are busied prior
+	 * to a VOP_GETPAGES operation, which acquires the teardown read lock.
+	 * Such pages will be invalid and can safely be skipped here.
 	 */
 	vp = ZTOV(zp);
+#if __FreeBSD_version >= 1400042
+	vn_pages_remove_valid(vp, 0, 0);
+#else
 	vn_pages_remove(vp, 0, 0);
+#endif
 
 	ZFS_OBJ_HOLD_ENTER(zfsvfs, obj_num);
 
@@ -1671,7 +1690,7 @@ zfs_create_fs(objset_t *os, cred_t *cr, nvlist_t *zplprops, dmu_tx_t *tx)
 	while ((elem = nvlist_next_nvpair(zplprops, elem)) != NULL) {
 		/* For the moment we expect all zpl props to be uint64_ts */
 		uint64_t val;
-		char *name;
+		const char *name;
 
 		ASSERT3S(nvpair_type(elem), ==, DATA_TYPE_UINT64);
 		val = fnvpair_value_uint64(elem);
@@ -1690,6 +1709,7 @@ zfs_create_fs(objset_t *os, cred_t *cr, nvlist_t *zplprops, dmu_tx_t *tx)
 	}
 	ASSERT3U(version, !=, 0);
 	error = zap_update(os, moid, ZPL_VERSION_STR, 8, 1, &version, tx);
+	ASSERT0(error);
 
 	/*
 	 * Create zap object used for SA attribute registration
@@ -1758,7 +1778,7 @@ zfs_create_fs(objset_t *os, cred_t *cr, nvlist_t *zplprops, dmu_tx_t *tx)
 
 	rootzp->z_zfsvfs = zfsvfs;
 	VERIFY0(zfs_acl_ids_create(rootzp, IS_ROOT_NODE, &vattr,
-	    cr, NULL, &acl_ids));
+	    cr, NULL, &acl_ids, NULL));
 	zfs_mknode(rootzp, &vattr, tx, cr, IS_ROOT_NODE, &zp, &acl_ids);
 	ASSERT3P(zp, ==, rootzp);
 	error = zap_add(os, moid, ZFS_ROOT_OBJ, 8, 1, &rootzp->z_id, tx);
@@ -1799,7 +1819,7 @@ zfs_sa_setup(objset_t *osp, sa_attr_type_t **sa_table)
 
 static int
 zfs_grab_sa_handle(objset_t *osp, uint64_t obj, sa_handle_t **hdlp,
-    dmu_buf_t **db, void *tag)
+    dmu_buf_t **db, const void *tag)
 {
 	dmu_object_info_t doi;
 	int error;
@@ -1826,7 +1846,7 @@ zfs_grab_sa_handle(objset_t *osp, uint64_t obj, sa_handle_t **hdlp,
 }
 
 static void
-zfs_release_sa_handle(sa_handle_t *hdl, dmu_buf_t *db, void *tag)
+zfs_release_sa_handle(sa_handle_t *hdl, dmu_buf_t *db, const void *tag)
 {
 	sa_handle_destroy(hdl);
 	sa_buf_rele(db, tag);
@@ -1934,7 +1954,6 @@ zfs_obj_to_path_impl(objset_t *osp, uint64_t obj, sa_handle_t *hdl,
 	} else if (error != ENOENT) {
 		return (error);
 	}
-	error = 0;
 
 	for (;;) {
 		uint64_t pobj;
@@ -1970,7 +1989,7 @@ zfs_obj_to_path_impl(objset_t *osp, uint64_t obj, sa_handle_t *hdl,
 		complen = strlen(component);
 		path -= complen;
 		ASSERT3P(path, >=, buf);
-		bcopy(component, path, complen);
+		memcpy(path, component, complen);
 		obj = pobj;
 
 		if (sa_hdl != hdl) {
@@ -2093,5 +2112,30 @@ zfs_znode_parent_and_name(znode_t *zp, znode_t **dzpp, char *buf)
 		return (err);
 	err = zfs_zget(zfsvfs, parent, dzpp);
 	return (err);
+}
+#endif /* _KERNEL */
+
+#ifdef _KERNEL
+int
+zfs_rlimit_fsize(off_t fsize)
+{
+	struct thread *td = curthread;
+	off_t lim;
+
+	if (td == NULL)
+		return (0);
+
+	lim = lim_cur(td, RLIMIT_FSIZE);
+	if (__predict_true((uoff_t)fsize <= lim))
+		return (0);
+
+	/*
+	 * The limit is reached.
+	 */
+	PROC_LOCK(td->td_proc);
+	kern_psignal(td->td_proc, SIGXFSZ);
+	PROC_UNLOCK(td->td_proc);
+
+	return (EFBIG);
 }
 #endif /* _KERNEL */

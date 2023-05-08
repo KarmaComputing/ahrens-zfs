@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -541,7 +541,7 @@ vdev_draid_generate_perms(const draid_map_t *map, uint8_t **permsp)
 int
 vdev_draid_lookup_map(uint64_t children, const draid_map_t **mapp)
 {
-	for (int i = 0; i <= VDEV_DRAID_MAX_MAPS; i++) {
+	for (int i = 0; i < VDEV_DRAID_MAX_MAPS; i++) {
 		if (draid_maps[i].dm_children == children) {
 			*mapp = &draid_maps[i];
 			return (0);
@@ -842,6 +842,53 @@ vdev_draid_map_alloc_empty(zio_t *zio, raidz_row_t *rr)
 }
 
 /*
+ * Verify that all empty sectors are zero filled before using them to
+ * calculate parity.  Otherwise, silent corruption in an empty sector will
+ * result in bad parity being generated.  That bad parity will then be
+ * considered authoritative and overwrite the good parity on disk.  This
+ * is possible because the checksum is only calculated over the data,
+ * thus it cannot be used to detect damage in empty sectors.
+ */
+int
+vdev_draid_map_verify_empty(zio_t *zio, raidz_row_t *rr)
+{
+	uint64_t skip_size = 1ULL << zio->io_vd->vdev_top->vdev_ashift;
+	uint64_t parity_size = rr->rr_col[0].rc_size;
+	uint64_t skip_off = parity_size - skip_size;
+	uint64_t empty_off = 0;
+	int ret = 0;
+
+	ASSERT3U(zio->io_type, ==, ZIO_TYPE_READ);
+	ASSERT3P(rr->rr_abd_empty, !=, NULL);
+	ASSERT3U(rr->rr_bigcols, >, 0);
+
+	void *zero_buf = kmem_zalloc(skip_size, KM_SLEEP);
+
+	for (int c = rr->rr_bigcols; c < rr->rr_cols; c++) {
+		raidz_col_t *rc = &rr->rr_col[c];
+
+		ASSERT3P(rc->rc_abd, !=, NULL);
+		ASSERT3U(rc->rc_size, ==, parity_size);
+
+		if (abd_cmp_buf_off(rc->rc_abd, zero_buf, skip_off,
+		    skip_size) != 0) {
+			vdev_raidz_checksum_error(zio, rc, rc->rc_abd);
+			abd_zero_off(rc->rc_abd, skip_off, skip_size);
+			rc->rc_error = SET_ERROR(ECKSUM);
+			ret++;
+		}
+
+		empty_off += skip_size;
+	}
+
+	ASSERT3U(empty_off, ==, abd_get_size(rr->rr_abd_empty));
+
+	kmem_free(zero_buf, skip_size);
+
+	return (ret);
+}
+
+/*
  * Given a logical address within a dRAID configuration, return the physical
  * address on the first drive in the group that this address maps to
  * (at position 'start' in permutation number 'perm').
@@ -976,7 +1023,11 @@ vdev_draid_map_alloc_row(zio_t *zio, raidz_row_t **rrp, uint64_t io_offset,
 	/* The total number of data and parity sectors for this I/O. */
 	uint64_t tot = psize + (vdc->vdc_nparity * (q + (r == 0 ? 0 : 1)));
 
+	ASSERT3U(vdc->vdc_nparity, >, 0);
+
 	raidz_row_t *rr = vdev_raidz_row_alloc(groupwidth);
+	rr = kmem_alloc(offsetof(raidz_row_t, rr_col[groupwidth]), KM_SLEEP);
+	rr->rr_cols = groupwidth;
 	rr->rr_scols = groupwidth;
 	rr->rr_firstdatacol = vdc->vdc_nparity;
 #ifdef ZFS_DEBUG
@@ -1434,8 +1485,14 @@ vdev_draid_calculate_asize(vdev_t *vd, uint64_t *asizep, uint64_t *max_asizep,
 		asize = MIN(asize - 1, cvd->vdev_asize - 1) + 1;
 		max_asize = MIN(max_asize - 1, cvd->vdev_max_asize - 1) + 1;
 		logical_ashift = MAX(logical_ashift, cvd->vdev_ashift);
-		physical_ashift = MAX(physical_ashift,
-		    cvd->vdev_physical_ashift);
+	}
+	for (int c = 0; c < vd->vdev_children; c++) {
+		vdev_t *cvd = vd->vdev_child[c];
+
+		if (cvd->vdev_ops == &vdev_draid_spare_ops)
+			continue;
+		physical_ashift = vdev_best_ashift(logical_ashift,
+		    physical_ashift, cvd->vdev_physical_ashift);
 	}
 
 	*asizep = asize;
@@ -1663,7 +1720,7 @@ vdev_draid_spare_create(nvlist_t *nvroot, vdev_t *vd, uint64_t *ndraidp,
 		uint64_t nparity = vdc->vdc_nparity;
 
 		for (uint64_t spare_id = 0; spare_id < nspares; spare_id++) {
-			bzero(path, sizeof (path));
+			memset(path, 0, sizeof (path));
 			(void) snprintf(path, sizeof (path) - 1,
 			    "%s%llu-%llu-%llu", VDEV_TYPE_DRAID,
 			    (u_longlong_t)nparity,
@@ -1692,7 +1749,7 @@ vdev_draid_spare_create(nvlist_t *nvroot, vdev_t *vd, uint64_t *ndraidp,
 	if (n > 0) {
 		(void) nvlist_remove_all(nvroot, ZPOOL_CONFIG_SPARES);
 		fnvlist_add_nvlist_array(nvroot, ZPOOL_CONFIG_SPARES,
-		    new_spares, n);
+		    (const nvlist_t **)new_spares, n);
 	}
 
 	for (int i = 0; i < n; i++)
@@ -2141,6 +2198,7 @@ vdev_draid_config_generate(vdev_t *vd, nvlist_t *nv)
 static int
 vdev_draid_init(spa_t *spa, nvlist_t *nv, void **tsd)
 {
+	(void) spa;
 	uint64_t ndata, nparity, nspares, ngroups;
 	int error;
 
@@ -2369,7 +2427,6 @@ vdev_draid_spare_get_child(vdev_t *vd, uint64_t physical_offset)
 	return (cvd);
 }
 
-/* ARGSUSED */
 static void
 vdev_draid_spare_close(vdev_t *vd)
 {
@@ -2628,10 +2685,10 @@ vdev_draid_spare_io_start(zio_t *zio)
 	zio_execute(zio);
 }
 
-/* ARGSUSED */
 static void
 vdev_draid_spare_io_done(zio_t *zio)
 {
+	(void) zio;
 }
 
 /*
@@ -2652,7 +2709,7 @@ vdev_draid_spare_lookup(spa_t *spa, nvlist_t *nv, uint64_t *top_guidp,
 		return (SET_ERROR(ENOENT));
 	}
 
-	char *spare_name;
+	const char *spare_name;
 	error = nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &spare_name);
 	if (error != 0)
 		return (SET_ERROR(EINVAL));
@@ -2660,7 +2717,7 @@ vdev_draid_spare_lookup(spa_t *spa, nvlist_t *nv, uint64_t *top_guidp,
 	for (int i = 0; i < nspares; i++) {
 		nvlist_t *spare = spares[i];
 		uint64_t top_guid, spare_id;
-		char *type, *path;
+		const char *type, *path;
 
 		/* Skip non-distributed spares */
 		error = nvlist_lookup_string(spare, ZPOOL_CONFIG_TYPE, &type);

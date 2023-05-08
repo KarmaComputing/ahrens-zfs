@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -81,11 +81,11 @@ typedef enum {
 } zfs_deleg_note_t;
 
 typedef struct zfs_deleg_perm_tab {
-	char *z_perm;
+	const char *z_perm;
 	zfs_deleg_note_t z_note;
 } zfs_deleg_perm_tab_t;
 
-_ZFS_DELEG_H zfs_deleg_perm_tab_t zfs_deleg_perm_tab[];
+_ZFS_DELEG_H const zfs_deleg_perm_tab_t zfs_deleg_perm_tab[];
 
 _ZFS_DELEG_H int zfs_deleg_verify_nvlist(nvlist_t *nvlist);
 _ZFS_DELEG_H void zfs_deleg_whokey(char *attr, zfs_deleg_who_type_t type,

@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -151,7 +151,7 @@ zfs_onexit_minor_to_state(minor_t minor, zfs_onexit_t **zo)
  */
 int
 zfs_onexit_add_cb(minor_t minor, void (*func)(void *), void *data,
-    uint64_t *action_handle)
+    uintptr_t *action_handle)
 {
 	zfs_onexit_t *zo;
 	zfs_onexit_action_node_t *ap;
@@ -170,7 +170,7 @@ zfs_onexit_add_cb(minor_t minor, void (*func)(void *), void *data,
 	list_insert_tail(&zo->zo_actions, ap);
 	mutex_exit(&zo->zo_lock);
 	if (action_handle)
-		*action_handle = (uint64_t)(uintptr_t)ap;
+		*action_handle = (uintptr_t)ap;
 
 	return (0);
 }

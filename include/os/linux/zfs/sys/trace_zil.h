@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -152,6 +152,11 @@
  *     zilog_t *, ...,
  *     itx_t *, ...);
  */
+
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wordered-compare-function-pointers"
+#endif
 /* BEGIN CSTYLED */
 DECLARE_EVENT_CLASS(zfs_zil_process_itx_class,
 	TP_PROTO(zilog_t *zilog, itx_t *itx),
@@ -169,15 +174,16 @@ DECLARE_EVENT_CLASS(zfs_zil_process_itx_class,
 	    ZILOG_TP_PRINTK_ARGS, ITX_TP_PRINTK_ARGS)
 );
 /* END CSTYLED */
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
-/* BEGIN CSTYLED */
 #define	DEFINE_ZIL_PROCESS_ITX_EVENT(name) \
 DEFINE_EVENT(zfs_zil_process_itx_class, name, \
-	TP_PROTO(zilog_t *zilog, itx_t *itx), \
-	TP_ARGS(zilog, itx))
+    TP_PROTO(zilog_t *zilog, itx_t *itx), \
+    TP_ARGS(zilog, itx))
 DEFINE_ZIL_PROCESS_ITX_EVENT(zfs_zil__process__commit__itx);
 DEFINE_ZIL_PROCESS_ITX_EVENT(zfs_zil__process__normal__itx);
-/* END CSTYLED */
 
 /*
  * Generic support for two argument tracepoints of the form:
@@ -203,13 +209,11 @@ DECLARE_EVENT_CLASS(zfs_zil_commit_io_error_class,
 	    ZILOG_TP_PRINTK_ARGS, ZCW_TP_PRINTK_ARGS)
 );
 
-/* BEGIN CSTYLED */
 #define	DEFINE_ZIL_COMMIT_IO_ERROR_EVENT(name) \
 DEFINE_EVENT(zfs_zil_commit_io_error_class, name, \
-	TP_PROTO(zilog_t *zilog, zil_commit_waiter_t *zcw), \
-	TP_ARGS(zilog, zcw))
+    TP_PROTO(zilog_t *zilog, zil_commit_waiter_t *zcw), \
+    TP_ARGS(zilog, zcw))
 DEFINE_ZIL_COMMIT_IO_ERROR_EVENT(zfs_zil__commit__io__error);
-/* END CSTYLED */
 
 #endif /* _TRACE_ZIL_H */
 

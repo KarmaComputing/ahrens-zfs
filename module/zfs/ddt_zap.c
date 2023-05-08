@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -31,8 +31,8 @@
 #include <sys/zap.h>
 #include <sys/dmu_tx.h>
 
-int ddt_zap_leaf_blockshift = 12;
-int ddt_zap_indirect_blockshift = 12;
+static const int ddt_zap_leaf_blockshift = 12;
+static const int ddt_zap_indirect_blockshift = 12;
 
 static int
 ddt_zap_create(objset_t *os, uint64_t *objectp, dmu_tx_t *tx, boolean_t prehash)

@@ -236,7 +236,7 @@ tests = ['zfs_upgrade_001_pos', 'zfs_upgrade_002_pos', 'zfs_upgrade_006_neg',
 tags = ['functional', 'cli_root', 'zfs_upgrade']
 
 [tests/functional/cli_root/zfs_wait]
-tests = ['zfs_wait_deleteq']
+tests = ['zfs_wait_deleteq', 'zfs_wait_getsubopt']
 tags = ['functional', 'cli_root', 'zfs_wait']
 
 [tests/functional/cli_root/zpool]
@@ -396,7 +396,8 @@ tests = ['zdb_001_neg', 'zfs_001_neg', 'zfs_allow_001_neg',
     'zpool_history_001_neg', 'zpool_offline_001_neg', 'zpool_online_001_neg',
     'zpool_remove_001_neg', 'zpool_scrub_001_neg', 'zpool_set_001_neg',
     'zpool_status_001_neg', 'zpool_upgrade_001_neg', 'arcstat_001_pos',
-    'arc_summary_001_pos', 'arc_summary_002_neg', 'zpool_wait_privilege']
+    'arc_summary_001_pos', 'arc_summary_002_neg', 'zpool_wait_privilege',
+    'zilstat_001_pos']
 user =
 tags = ['functional', 'cli_user', 'misc']
 
@@ -433,12 +434,14 @@ tests = ['grow_pool_001_pos', 'grow_replicas_001_pos']
 tags = ['functional', 'grow']
 
 [tests/functional/history]
-tests = ['history_004_pos', 'history_005_neg', 'history_006_neg',
-    'history_007_pos', 'history_008_pos', 'history_009_pos']
+tests = ['history_004_pos', 'history_005_neg', 'history_007_pos',
+    'history_009_pos']
 tags = ['functional', 'history']
 
 [tests/functional/hkdf]
-tests = ['run_hkdf_test']
+pre =
+post =
+tests = ['hkdf_test']
 tags = ['functional', 'hkdf']
 
 [tests/functional/inuse]
@@ -547,6 +550,7 @@ tests = ['recv_dedup', 'recv_dedup_encrypted_zvol', 'rsend_001_pos',
     'rsend_014_pos', 'rsend_016_neg', 'send-c_verify_contents',
     'send-c_volume', 'send-c_zstreamdump', 'send-c_recv_dedup',
     'send-L_toggle', 'send_encrypted_hierarchy', 'send_encrypted_props',
+    'send_encrypted_freeobjects',
     'send_encrypted_truncated_files', 'send_freeobjects', 'send_holds',
     'send_mixed_raw', 'send-wR_encrypted_zvol', 'send_partial_dataset',
     'send_invalid']
@@ -562,12 +566,12 @@ tags = ['functional', 'slog']
 
 [tests/functional/snapshot]
 tests = ['clone_001_pos', 'rollback_001_pos', 'rollback_002_pos',
-    'rollback_003_pos', 'snapshot_001_pos', 'snapshot_002_pos',
-    'snapshot_003_pos', 'snapshot_004_pos', 'snapshot_005_pos',
-    'snapshot_006_pos', 'snapshot_007_pos', 'snapshot_008_pos',
-    'snapshot_009_pos', 'snapshot_010_pos', 'snapshot_011_pos',
-    'snapshot_012_pos', 'snapshot_013_pos', 'snapshot_014_pos',
-    'snapshot_017_pos']
+    'snapshot_001_pos', 'snapshot_002_pos', 'snapshot_003_pos',
+    'snapshot_004_pos', 'snapshot_005_pos', 'snapshot_006_pos',
+    'snapshot_007_pos', 'snapshot_008_pos', 'snapshot_009_pos',
+    'snapshot_010_pos', 'snapshot_011_pos', 'snapshot_012_pos',
+    'snapshot_013_pos', 'snapshot_014_pos', 'snapshot_017_pos',
+    'snapshot_018_pos']
 tags = ['functional', 'snapshot']
 
 [tests/functional/snapused]
@@ -583,7 +587,7 @@ tests = ['suid_write_to_suid', 'suid_write_to_sgid', 'suid_write_to_suid_sgid',
     'suid_write_to_none']
 tags = ['functional', 'suid']
 
-[tests/functional/threadsappend]
+[tests/functional/append]
 tests = ['threadsappend_001_pos']
 tags = ['functional', 'threadsappend']
 
@@ -603,7 +607,7 @@ tags = ['functional', 'vdev_zaps']
 [tests/functional/xattr]
 tests = ['xattr_001_pos', 'xattr_002_neg', 'xattr_003_neg', 'xattr_004_pos',
     'xattr_005_pos', 'xattr_006_pos', 'xattr_007_neg',
-    'xattr_011_pos', 'xattr_013_pos']
+    'xattr_011_pos', 'xattr_013_pos', 'xattr_compat']
 tags = ['functional', 'xattr']
 
 [tests/functional/zvol/zvol_ENOSPC]
@@ -621,3 +625,9 @@ tags = ['functional', 'zvol', 'zvol_swap']
 [tests/functional/zpool_influxdb]
 tests = ['zpool_influxdb']
 tags = ['functional', 'zpool_influxdb']
+
+[tests/functional/pyzfs]
+tests = ['pyzfs_unittest']
+pre =
+post =
+tags = ['functional', 'pyzfs']

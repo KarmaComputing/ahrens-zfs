@@ -1,8 +1,7 @@
 ##
-# zed.rc
-#
-# This file should be owned by root and permissioned 0600.
+# zed.rc – ZEDLET configuration.
 ##
+# shellcheck disable=SC2034
 
 ##
 # Absolute path to the debug output file.
@@ -13,9 +12,9 @@
 # Email address of the zpool administrator for receipt of notifications;
 #   multiple addresses can be specified if they are delimited by whitespace.
 # Email will only be sent if ZED_EMAIL_ADDR is defined.
-# Disabled by default; uncomment to enable.
+# Enabled by default; comment to disable.
 #
-#ZED_EMAIL_ADDR="root"
+ZED_EMAIL_ADDR="root"
 
 ##
 # Name or path of executable responsible for sending notifications via email;
@@ -30,6 +29,7 @@
 # The string @SUBJECT@ will be replaced with the notification subject;
 #   this should be protected with quotes to prevent word-splitting.
 # Email will only be sent if ZED_EMAIL_ADDR is defined.
+# If @SUBJECT@ was omited here, a "Subject: ..." header will be added to notification
 #
 #ZED_EMAIL_OPTS="-s '@SUBJECT@' @ADDRESS@"
 

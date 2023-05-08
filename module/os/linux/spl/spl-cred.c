@@ -128,7 +128,7 @@ groupmember(gid_t gid, const cred_t *cr)
 uid_t
 crgetuid(const cred_t *cr)
 {
-	return (KUID_TO_SUID(cr->euid));
+	return (KUID_TO_SUID(cr->fsuid));
 }
 
 /* Return the real user id */
@@ -138,58 +138,30 @@ crgetruid(const cred_t *cr)
 	return (KUID_TO_SUID(cr->uid));
 }
 
-/* Return the saved user id */
-uid_t
-crgetsuid(const cred_t *cr)
-{
-	return (KUID_TO_SUID(cr->suid));
-}
-
-/* Return the filesystem user id */
-uid_t
-crgetfsuid(const cred_t *cr)
-{
-	return (KUID_TO_SUID(cr->fsuid));
-}
-
 /* Return the effective group id */
 gid_t
 crgetgid(const cred_t *cr)
 {
-	return (KGID_TO_SGID(cr->egid));
-}
-
-/* Return the real group id */
-gid_t
-crgetrgid(const cred_t *cr)
-{
-	return (KGID_TO_SGID(cr->gid));
-}
-
-/* Return the saved group id */
-gid_t
-crgetsgid(const cred_t *cr)
-{
-	return (KGID_TO_SGID(cr->sgid));
-}
-
-/* Return the filesystem group id */
-gid_t
-crgetfsgid(const cred_t *cr)
-{
 	return (KGID_TO_SGID(cr->fsgid));
 }
 
+/* Return the initial user ns or nop_mnt_idmap */
+zidmap_t *
+zfs_get_init_idmap(void)
+{
+#ifdef HAVE_IOPS_CREATE_IDMAP
+	return ((zidmap_t *)&nop_mnt_idmap);
+#else
+	return ((zidmap_t *)&init_user_ns);
+#endif
+}
+
+EXPORT_SYMBOL(zfs_get_init_idmap);
 EXPORT_SYMBOL(crhold);
 EXPORT_SYMBOL(crfree);
 EXPORT_SYMBOL(crgetuid);
 EXPORT_SYMBOL(crgetruid);
-EXPORT_SYMBOL(crgetsuid);
-EXPORT_SYMBOL(crgetfsuid);
 EXPORT_SYMBOL(crgetgid);
-EXPORT_SYMBOL(crgetrgid);
-EXPORT_SYMBOL(crgetsgid);
-EXPORT_SYMBOL(crgetfsgid);
 EXPORT_SYMBOL(crgetngroups);
 EXPORT_SYMBOL(crgetgroups);
 EXPORT_SYMBOL(groupmember);

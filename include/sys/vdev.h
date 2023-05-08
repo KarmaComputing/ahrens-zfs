@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -104,7 +104,7 @@ extern void vdev_metaslab_fini(vdev_t *vd);
 extern void vdev_metaslab_set_size(vdev_t *);
 extern void vdev_expand(vdev_t *vd, uint64_t txg);
 extern void vdev_split(vdev_t *vd);
-extern void vdev_deadman(vdev_t *vd, char *tag);
+extern void vdev_deadman(vdev_t *vd, const char *tag);
 
 typedef void vdev_xlate_func_t(void *arg, range_seg64_t *physical_rs);
 
@@ -152,6 +152,7 @@ extern int vdev_degrade(spa_t *spa, uint64_t guid, vdev_aux_t aux);
 extern int vdev_online(spa_t *spa, uint64_t guid, uint64_t flags,
     vdev_state_t *);
 extern int vdev_offline(spa_t *spa, uint64_t guid, uint64_t flags);
+extern int vdev_remove_wanted(spa_t *spa, uint64_t guid);
 extern void vdev_clear(spa_t *spa, vdev_t *vd);
 
 extern boolean_t vdev_is_dead(vdev_t *vd);
@@ -189,11 +190,12 @@ extern boolean_t vdev_clear_resilver_deferred(vdev_t *vd, dmu_tx_t *tx);
 typedef enum vdev_config_flag {
 	VDEV_CONFIG_SPARE = 1 << 0,
 	VDEV_CONFIG_L2CACHE = 1 << 1,
-	VDEV_CONFIG_REMOVING = 1 << 2,
-	VDEV_CONFIG_MOS = 1 << 3,
-	VDEV_CONFIG_MISSING = 1 << 4
+	VDEV_CONFIG_MOS = 1 << 2,
+	VDEV_CONFIG_MISSING = 1 << 3
 } vdev_config_flag_t;
 
+extern void vdev_post_kobj_evt(vdev_t *vd);
+extern void vdev_clear_kobj_evt(vdev_t *vd);
 extern void vdev_top_config_generate(spa_t *spa, nvlist_t *config);
 extern nvlist_t *vdev_config_generate(spa_t *spa, vdev_t *vd,
     boolean_t getstats, vdev_config_flag_t flags);
@@ -223,6 +225,9 @@ typedef enum {
 } vdev_labeltype_t;
 
 extern int vdev_label_init(vdev_t *vd, uint64_t txg, vdev_labeltype_t reason);
+
+extern int vdev_prop_set(vdev_t *vd, nvlist_t *innvl, nvlist_t *outnvl);
+extern int vdev_prop_get(vdev_t *vd, nvlist_t *nvprops, nvlist_t *outnvl);
 
 #ifdef	__cplusplus
 }

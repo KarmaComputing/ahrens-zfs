@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -504,7 +504,16 @@ vdev_config_generate(spa_t *spa, vdev_t *vd, boolean_t getstats,
 		fnvlist_add_uint64(nv, ZPOOL_CONFIG_ASIZE,
 		    vd->vdev_asize);
 		fnvlist_add_uint64(nv, ZPOOL_CONFIG_IS_LOG, vd->vdev_islog);
-		if (vd->vdev_removing) {
+		if (vd->vdev_noalloc) {
+			fnvlist_add_uint64(nv, ZPOOL_CONFIG_NONALLOCATING,
+			    vd->vdev_noalloc);
+		}
+
+		/*
+		 * Slog devices are removed synchronously so don't
+		 * persist the vdev_removing flag to the label.
+		 */
+		if (vd->vdev_removing && !vd->vdev_islog) {
 			fnvlist_add_uint64(nv, ZPOOL_CONFIG_REMOVING,
 			    vd->vdev_removing);
 		}
@@ -570,6 +579,12 @@ vdev_config_generate(spa_t *spa, vdev_t *vd, boolean_t getstats,
 			ASSERT(vd == vd->vdev_top);
 			fnvlist_add_uint64(nv, ZPOOL_CONFIG_VDEV_TOP_ZAP,
 			    vd->vdev_top_zap);
+		}
+
+		if (vd->vdev_ops == &vdev_root_ops && vd->vdev_root_zap != 0 &&
+		    spa_feature_is_active(vd->vdev_spa, SPA_FEATURE_AVZ_V2)) {
+			fnvlist_add_uint64(nv, ZPOOL_CONFIG_VDEV_ROOT_ZAP,
+			    vd->vdev_root_zap);
 		}
 
 		if (vd->vdev_resilver_deferred) {
@@ -648,35 +663,22 @@ vdev_config_generate(spa_t *spa, vdev_t *vd, boolean_t getstats,
 
 	if (!vd->vdev_ops->vdev_op_leaf) {
 		nvlist_t **child;
-		int c, idx;
+		uint64_t c;
 
 		ASSERT(!vd->vdev_ishole);
 
 		child = kmem_alloc(vd->vdev_children * sizeof (nvlist_t *),
 		    KM_SLEEP);
 
-		for (c = 0, idx = 0; c < vd->vdev_children; c++) {
-			vdev_t *cvd = vd->vdev_child[c];
-
-			/*
-			 * If we're generating an nvlist of removing
-			 * vdevs then skip over any device which is
-			 * not being removed.
-			 */
-			if ((flags & VDEV_CONFIG_REMOVING) &&
-			    !cvd->vdev_removing)
-				continue;
-
-			child[idx++] = vdev_config_generate(spa, cvd,
+		for (c = 0; c < vd->vdev_children; c++) {
+			child[c] = vdev_config_generate(spa, vd->vdev_child[c],
 			    getstats, flags);
 		}
 
-		if (idx) {
-			fnvlist_add_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN,
-			    child, idx);
-		}
+		fnvlist_add_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN,
+		    (const nvlist_t * const *)child, vd->vdev_children);
 
-		for (c = 0; c < idx; c++)
+		for (c = 0; c < vd->vdev_children; c++)
 			nvlist_free(child[c]);
 
 		kmem_free(child, vd->vdev_children * sizeof (nvlist_t *));
@@ -1328,7 +1330,7 @@ vdev_label_read_bootenv(vdev_t *rvd, nvlist_t *bootenv)
 				nvlist_free(config);
 				break;
 			}
-			fallthrough;
+			zfs_fallthrough;
 		default:
 			/* Check for FreeBSD zfs bootonce command string */
 			buf = abd_to_buf(abd);
@@ -1363,6 +1365,7 @@ vdev_label_write_bootenv(vdev_t *vd, nvlist_t *env)
 	int error;
 	size_t nvsize;
 	char *nvbuf;
+	const char *tmp;
 
 	error = nvlist_size(env, &nvsize, NV_ENCODE_XDR);
 	if (error != 0)
@@ -1402,8 +1405,8 @@ vdev_label_write_bootenv(vdev_t *vd, nvlist_t *env)
 	bootenv->vbe_version = fnvlist_lookup_uint64(env, BOOTENV_VERSION);
 	switch (bootenv->vbe_version) {
 	case VB_RAW:
-		if (nvlist_lookup_string(env, GRUB_ENVMAP, &nvbuf) == 0) {
-			(void) strlcpy(bootenv->vbe_bootenv, nvbuf, nvsize);
+		if (nvlist_lookup_string(env, GRUB_ENVMAP, &tmp) == 0) {
+			(void) strlcpy(bootenv->vbe_bootenv, tmp, nvsize);
 		}
 		error = 0;
 		break;
@@ -1573,8 +1576,7 @@ vdev_uberblock_load(vdev_t *rvd, uberblock_t *ub, nvlist_t **config)
 	ASSERT(ub);
 	ASSERT(config);
 
-	bzero(ub, sizeof (uberblock_t));
-	bzero(&cb, sizeof (cb));
+	memset(ub, 0, sizeof (uberblock_t)); /* TODO ask/verify `cb` is being/needs to be freed here as was before https://github.com/ahrens/zfs/blob/2f2ae112584fb357c3fd3b71ed8006a0f01b6996/module/zfs/vdev_label.c */ 
 	*config = NULL;
 
 	cb.ubl_ubbest = ub;

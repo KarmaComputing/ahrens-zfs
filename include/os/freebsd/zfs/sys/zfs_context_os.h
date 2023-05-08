@@ -45,10 +45,8 @@
 #define	HAVE_LARGE_STACKS	1
 #endif
 
-#define	cond_resched()		kern_yield(PRI_USER)
-
 #define	taskq_create_sysdc(a, b, d, e, p, dc, f) \
-	    (taskq_create(a, b, maxclsyspri, d, e, f))
+	    ((void) sizeof (dc), taskq_create(a, b, maxclsyspri, d, e, f))
 
 #define	tsd_create(keyp, destructor)    do {                 \
 		*(keyp) = osd_thread_register((destructor));         \

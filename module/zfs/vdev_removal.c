@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -94,7 +94,7 @@ typedef struct vdev_copy_arg {
  * doing a device removal.  This determines how much i/o we can have
  * in flight concurrently.
  */
-int zfs_remove_max_copy_bytes = 64 * 1024 * 1024;
+static const uint_t zfs_remove_max_copy_bytes = 64 * 1024 * 1024;
 
 /*
  * The largest contiguous segment that we will attempt to allocate when
@@ -104,7 +104,7 @@ int zfs_remove_max_copy_bytes = 64 * 1024 * 1024;
  *
  * See also the accessor function spa_remove_max_segment().
  */
-int zfs_remove_max_segment = SPA_MAXBLOCKSIZE;
+uint_t zfs_remove_max_segment = SPA_MAXBLOCKSIZE;
 
 /*
  * Ignore hard IO errors during device removal.  When set if a device
@@ -112,7 +112,7 @@ int zfs_remove_max_segment = SPA_MAXBLOCKSIZE;
  * not be cancelled.  This can result in a normally recoverable block
  * becoming permanently damaged and is not recommended.
  */
-int zfs_removal_ignore_errors = 0;
+static int zfs_removal_ignore_errors = 0;
 
 /*
  * Allow a remap segment to span free chunks of at most this size. The main
@@ -130,7 +130,7 @@ int zfs_removal_ignore_errors = 0;
  *  - we'll do larger allocations, which may fail and fall back on smaller
  *    allocations
  */
-int vdev_removal_max_span = 32 * 1024;
+uint_t vdev_removal_max_span = 32 * 1024;
 
 /*
  * This is used by the test suite so that it can ensure that certain
@@ -140,7 +140,7 @@ int zfs_removal_suspend_progress = 0;
 
 #define	VDEV_REMOVAL_ZAP_OBJS	"lzap"
 
-static void spa_vdev_remove_thread(void *arg);
+static __attribute__((noreturn)) void spa_vdev_remove_thread(void *arg);
 static int spa_vdev_remove_cancel_impl(spa_t *spa);
 
 static void
@@ -168,8 +168,178 @@ spa_nvlist_lookup_by_guid(nvlist_t **nvpp, int count, uint64_t target_guid)
 }
 
 static void
-spa_vdev_remove_aux(nvlist_t *config, char *name, nvlist_t **dev, int count,
-    nvlist_t *dev_to_remove)
+vdev_activate(vdev_t *vd)
+{
+	metaslab_group_t *mg = vd->vdev_mg;
+	spa_t *spa = vd->vdev_spa;
+	uint64_t vdev_space = spa_deflate(spa) ?
+	    vd->vdev_stat.vs_dspace : vd->vdev_stat.vs_space;
+
+	ASSERT(!vd->vdev_islog);
+	ASSERT(vd->vdev_noalloc);
+
+	metaslab_group_activate(mg);
+	metaslab_group_activate(vd->vdev_log_mg);
+
+	ASSERT3U(spa->spa_nonallocating_dspace, >=, vdev_space);
+
+	spa->spa_nonallocating_dspace -= vdev_space;
+
+	vd->vdev_noalloc = B_FALSE;
+}
+
+static int
+vdev_passivate(vdev_t *vd, uint64_t *txg)
+{
+	spa_t *spa = vd->vdev_spa;
+	int error;
+
+	ASSERT(!vd->vdev_noalloc);
+
+	vdev_t *rvd = spa->spa_root_vdev;
+	metaslab_group_t *mg = vd->vdev_mg;
+	metaslab_class_t *normal = spa_normal_class(spa);
+	if (mg->mg_class == normal) {
+		/*
+		 * We must check that this is not the only allocating device in
+		 * the pool before passivating, otherwise we will not be able
+		 * to make progress because we can't allocate from any vdevs.
+		 */
+		boolean_t last = B_TRUE;
+		for (uint64_t id = 0; id < rvd->vdev_children; id++) {
+			vdev_t *cvd = rvd->vdev_child[id];
+
+			if (cvd == vd ||
+			    cvd->vdev_ops == &vdev_indirect_ops)
+				continue;
+
+			metaslab_class_t *mc = cvd->vdev_mg->mg_class;
+			if (mc != normal)
+				continue;
+
+			if (!cvd->vdev_noalloc) {
+				last = B_FALSE;
+				break;
+			}
+		}
+		if (last)
+			return (SET_ERROR(EINVAL));
+	}
+
+	metaslab_group_passivate(mg);
+	ASSERT(!vd->vdev_islog);
+	metaslab_group_passivate(vd->vdev_log_mg);
+
+	/*
+	 * Wait for the youngest allocations and frees to sync,
+	 * and then wait for the deferral of those frees to finish.
+	 */
+	spa_vdev_config_exit(spa, NULL,
+	    *txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, 0, FTAG);
+
+	/*
+	 * We must ensure that no "stubby" log blocks are allocated
+	 * on the device to be removed.  These blocks could be
+	 * written at any time, including while we are in the middle
+	 * of copying them.
+	 */
+	error = spa_reset_logs(spa);
+
+	*txg = spa_vdev_config_enter(spa);
+
+	if (error != 0) {
+		metaslab_group_activate(mg);
+		ASSERT(!vd->vdev_islog);
+		if (vd->vdev_log_mg != NULL)
+			metaslab_group_activate(vd->vdev_log_mg);
+		return (error);
+	}
+
+	spa->spa_nonallocating_dspace += spa_deflate(spa) ?
+	    vd->vdev_stat.vs_dspace : vd->vdev_stat.vs_space;
+	vd->vdev_noalloc = B_TRUE;
+
+	return (0);
+}
+
+/*
+ * Turn off allocations for a top-level device from the pool.
+ *
+ * Turning off allocations for a top-level device can take a significant
+ * amount of time. As a result we use the spa_vdev_config_[enter/exit]
+ * functions which allow us to grab and release the spa_config_lock while
+ * still holding the namespace lock. During each step the configuration
+ * is synced out.
+ */
+int
+spa_vdev_noalloc(spa_t *spa, uint64_t guid)
+{
+	vdev_t *vd;
+	uint64_t txg;
+	int error = 0;
+
+	ASSERT(!MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_writeable(spa));
+
+	txg = spa_vdev_enter(spa);
+
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+
+	vd = spa_lookup_by_guid(spa, guid, B_FALSE);
+
+	if (vd == NULL)
+		error = SET_ERROR(ENOENT);
+	else if (vd->vdev_mg == NULL)
+		error = SET_ERROR(ZFS_ERR_VDEV_NOTSUP);
+	else if (!vd->vdev_noalloc)
+		error = vdev_passivate(vd, &txg);
+
+	if (error == 0) {
+		vdev_dirty_leaves(vd, VDD_DTL, txg);
+		vdev_config_dirty(vd);
+	}
+
+	error = spa_vdev_exit(spa, NULL, txg, error);
+
+	return (error);
+}
+
+int
+spa_vdev_alloc(spa_t *spa, uint64_t guid)
+{
+	vdev_t *vd;
+	uint64_t txg;
+	int error = 0;
+
+	ASSERT(!MUTEX_HELD(&spa_namespace_lock));
+	ASSERT(spa_writeable(spa));
+
+	txg = spa_vdev_enter(spa);
+
+	ASSERT(MUTEX_HELD(&spa_namespace_lock));
+
+	vd = spa_lookup_by_guid(spa, guid, B_FALSE);
+
+	if (vd == NULL)
+		error = SET_ERROR(ENOENT);
+	else if (vd->vdev_mg == NULL)
+		error = SET_ERROR(ZFS_ERR_VDEV_NOTSUP);
+	else if (!vd->vdev_removing)
+		vdev_activate(vd);
+
+	if (error == 0) {
+		vdev_dirty_leaves(vd, VDD_DTL, txg);
+		vdev_config_dirty(vd);
+	}
+
+	(void) spa_vdev_exit(spa, NULL, txg, error);
+
+	return (error);
+}
+
+static void
+spa_vdev_remove_aux(nvlist_t *config, const char *name, nvlist_t **dev,
+    int count, nvlist_t *dev_to_remove)
 {
 	nvlist_t **newdev = NULL;
 
@@ -183,7 +353,8 @@ spa_vdev_remove_aux(nvlist_t *config, char *name, nvlist_t **dev, int count,
 	}
 
 	VERIFY(nvlist_remove(config, name, DATA_TYPE_NVLIST_ARRAY) == 0);
-	VERIFY(nvlist_add_nvlist_array(config, name, newdev, count - 1) == 0);
+	fnvlist_add_nvlist_array(config, name, (const nvlist_t * const *)newdev,
+	    count - 1);
 
 	for (int i = 0; i < count - 1; i++)
 		nvlist_free(newdev[i]);
@@ -997,11 +1168,11 @@ spa_vdev_copy_segment(vdev_t *vd, range_tree_t *segs,
 	metaslab_class_t *mc = mg->mg_class;
 	if (mc->mc_groups == 0)
 		mc = spa_normal_class(spa);
-	int error = metaslab_alloc_dva(spa, mc, size, &dst, 0, NULL, txg, 0,
-	    zal, 0);
+	int error = metaslab_alloc_dva(spa, mc, size, &dst, 0, NULL, txg,
+	    METASLAB_DONT_THROTTLE, zal, 0);
 	if (error == ENOSPC && mc != spa_normal_class(spa)) {
 		error = metaslab_alloc_dva(spa, spa_normal_class(spa), size,
-		    &dst, 0, NULL, txg, 0, zal, 0);
+		    &dst, 0, NULL, txg, METASLAB_DONT_THROTTLE, zal, 0);
 	}
 	if (error != 0)
 		return (error);
@@ -1193,12 +1364,22 @@ vdev_remove_complete(spa_t *spa)
 	ASSERT3P(vd->vdev_initialize_thread, ==, NULL);
 	ASSERT3P(vd->vdev_trim_thread, ==, NULL);
 	ASSERT3P(vd->vdev_autotrim_thread, ==, NULL);
+	vdev_rebuild_stop_wait(vd);
+	ASSERT3P(vd->vdev_rebuild_thread, ==, NULL);
+	uint64_t vdev_space = spa_deflate(spa) ?
+	    vd->vdev_stat.vs_dspace : vd->vdev_stat.vs_space;
 
 	sysevent_t *ev = spa_event_create(spa, vd, NULL,
 	    ESC_ZFS_VDEV_REMOVE_DEV);
 
 	zfs_dbgmsg("finishing device removal for vdev %llu in txg %llu",
 	    (u_longlong_t)vd->vdev_id, (u_longlong_t)txg);
+
+	ASSERT3U(0, !=, vdev_space);
+	ASSERT3U(spa->spa_nonallocating_dspace, >=, vdev_space);
+
+	/* the vdev is no longer part of the dspace */
+	spa->spa_nonallocating_dspace -= vdev_space;
 
 	/*
 	 * Discard allocation state.
@@ -1207,7 +1388,6 @@ vdev_remove_complete(spa_t *spa)
 		vdev_metaslab_fini(vd);
 		metaslab_group_destroy(vd->vdev_mg);
 		vd->vdev_mg = NULL;
-		spa_log_sm_set_blocklimit(spa);
 	}
 	if (vd->vdev_log_mg != NULL) {
 		ASSERT0(vd->vdev_ms_count);
@@ -1410,7 +1590,7 @@ spa_remove_max_segment(spa_t *spa)
  * TXG have completed (see spa_txg_zio) and writes the new mappings to disk
  * (see vdev_mapping_sync()).
  */
-static void
+static __attribute__((noreturn)) void
 spa_vdev_remove_thread(void *arg)
 {
 	spa_t *spa = arg;
@@ -1619,10 +1799,32 @@ spa_vdev_remove_suspend(spa_t *spa)
 	mutex_exit(&svr->svr_lock);
 }
 
-/* ARGSUSED */
+/*
+ * Return true if the "allocating" property has been set to "off"
+ */
+static boolean_t
+vdev_prop_allocating_off(vdev_t *vd)
+{
+	uint64_t objid = vd->vdev_top_zap;
+	uint64_t allocating = 1;
+
+	/* no vdev property object => no props */
+	if (objid != 0) {
+		spa_t *spa = vd->vdev_spa;
+		objset_t *mos = spa->spa_meta_objset;
+
+		mutex_enter(&spa->spa_props_lock);
+		(void) zap_lookup(mos, objid, "allocating", sizeof (uint64_t),
+		    1, &allocating);
+		mutex_exit(&spa->spa_props_lock);
+	}
+	return (allocating == 0);
+}
+
 static int
 spa_vdev_remove_cancel_check(void *arg, dmu_tx_t *tx)
 {
+	(void) arg;
 	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
 
 	if (spa->spa_vdev_removal == NULL)
@@ -1634,10 +1836,10 @@ spa_vdev_remove_cancel_check(void *arg, dmu_tx_t *tx)
  * Cancel a removal by freeing all entries from the partial mapping
  * and marking the vdev as no longer being removing.
  */
-/* ARGSUSED */
 static void
 spa_vdev_remove_cancel_sync(void *arg, dmu_tx_t *tx)
 {
+	(void) arg;
 	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
 	spa_vdev_removal_t *svr = spa->spa_vdev_removal;
 	vdev_t *vd = vdev_lookup_top(spa, svr->svr_vdev_id);
@@ -1761,6 +1963,13 @@ spa_vdev_remove_cancel_sync(void *arg, dmu_tx_t *tx)
 	spa_finish_removal(spa, DSS_CANCELED, tx);
 
 	vd->vdev_removing = B_FALSE;
+
+	if (!vdev_prop_allocating_off(vd)) {
+		spa_config_enter(spa, SCL_ALLOC | SCL_VDEV, FTAG, RW_WRITER);
+		vdev_activate(vd);
+		spa_config_exit(spa, SCL_ALLOC | SCL_VDEV, FTAG);
+	}
+
 	vdev_config_dirty(vd);
 
 	zfs_dbgmsg("canceled device removal for vdev %llu in %llu",
@@ -1774,21 +1983,9 @@ spa_vdev_remove_cancel_sync(void *arg, dmu_tx_t *tx)
 static int
 spa_vdev_remove_cancel_impl(spa_t *spa)
 {
-	uint64_t vdid = spa->spa_vdev_removal->svr_vdev_id;
-
 	int error = dsl_sync_task(spa->spa_name, spa_vdev_remove_cancel_check,
 	    spa_vdev_remove_cancel_sync, NULL, 0,
 	    ZFS_SPACE_CHECK_EXTRA_RESERVED);
-
-	if (error == 0) {
-		spa_config_enter(spa, SCL_ALLOC | SCL_VDEV, FTAG, RW_WRITER);
-		vdev_t *vd = vdev_lookup_top(spa, vdid);
-		metaslab_group_activate(vd->vdev_mg);
-		ASSERT(!vd->vdev_islog);
-		metaslab_group_activate(vd->vdev_log_mg);
-		spa_config_exit(spa, SCL_ALLOC | SCL_VDEV, FTAG);
-	}
-
 	return (error);
 }
 
@@ -1935,7 +2132,6 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 	 * metaslab_class_histogram_verify()
 	 */
 	vdev_metaslab_fini(vd);
-	spa_log_sm_set_blocklimit(spa);
 
 	spa_vdev_config_exit(spa, NULL, *txg, 0, FTAG);
 	*txg = spa_vdev_config_enter(spa);
@@ -1984,6 +2180,11 @@ spa_vdev_remove_top_check(vdev_t *vd)
 	if (!spa_feature_is_enabled(spa, SPA_FEATURE_DEVICE_REMOVAL))
 		return (SET_ERROR(ENOTSUP));
 
+	/*
+	 * This device is already being removed
+	 */
+	if (vd->vdev_removing)
+		return (SET_ERROR(EALREADY));
 
 	metaslab_class_t *mc = vd->vdev_mg->mg_class;
 	metaslab_class_t *normal = spa_normal_class(spa);
@@ -2002,20 +2203,12 @@ spa_vdev_remove_top_check(vdev_t *vd)
 		ASSERT3U(available, >=, vd->vdev_stat.vs_alloc);
 		if (available < vd->vdev_stat.vs_alloc)
 			return (SET_ERROR(ENOSPC));
-	} else {
+	} else if (!vd->vdev_noalloc) {
 		/* available space in the pool's normal class */
 		uint64_t available = dsl_dir_space_available(
 		    spa->spa_dsl_pool->dp_root_dir, NULL, 0, B_TRUE);
-		if (available <
-		    vd->vdev_stat.vs_dspace + spa_get_slop_space(spa)) {
-			/*
-			 * This is a normal device. There has to be enough free
-			 * space to remove the device and leave double the
-			 * "slop" space (i.e. we must leave at least 3% of the
-			 * pool free, in addition to the normal slop space).
-			 */
+		if (available < vd->vdev_stat.vs_dspace)
 			return (SET_ERROR(ENOSPC));
-		}
 	}
 
 	/*
@@ -2058,7 +2251,6 @@ spa_vdev_remove_top_check(vdev_t *vd)
 	 * and not be raidz or draid.
 	 */
 	vdev_t *rvd = spa->spa_root_vdev;
-	int num_indirect = 0;
 	for (uint64_t id = 0; id < rvd->vdev_children; id++) {
 		vdev_t *cvd = rvd->vdev_child[id];
 
@@ -2074,8 +2266,6 @@ spa_vdev_remove_top_check(vdev_t *vd)
 		if (cvd->vdev_ashift != 0 &&
 		    cvd->vdev_alloc_bias == VDEV_BIAS_NONE)
 			ASSERT3U(cvd->vdev_ashift, ==, spa->spa_max_ashift);
-		if (cvd->vdev_ops == &vdev_indirect_ops)
-			num_indirect++;
 		if (!vdev_is_concrete(cvd))
 			continue;
 		if (vdev_get_nparity(cvd) != 0)
@@ -2108,6 +2298,7 @@ static int
 spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 {
 	spa_t *spa = vd->vdev_spa;
+	boolean_t set_noalloc = B_FALSE;
 	int error;
 
 	/*
@@ -2116,8 +2307,6 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 	 * are errors.
 	 */
 	error = spa_vdev_remove_top_check(vd);
-	if (error != 0)
-		return (error);
 
 	/*
 	 * Stop allocating from this vdev.  Note that we must check
@@ -2127,31 +2316,22 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 	 * The above check for sufficient free space serves this
 	 * purpose.
 	 */
-	metaslab_group_t *mg = vd->vdev_mg;
-	metaslab_group_passivate(mg);
-	ASSERT(!vd->vdev_islog);
-	metaslab_group_passivate(vd->vdev_log_mg);
+	if (error == 0 && !vd->vdev_noalloc) {
+		set_noalloc = B_TRUE;
+		error = vdev_passivate(vd, txg);
+	}
 
-	/*
-	 * Wait for the youngest allocations and frees to sync,
-	 * and then wait for the deferral of those frees to finish.
-	 */
-	spa_vdev_config_exit(spa, NULL,
-	    *txg + TXG_CONCURRENT_STATES + TXG_DEFER_SIZE, 0, FTAG);
-
-	/*
-	 * We must ensure that no "stubby" log blocks are allocated
-	 * on the device to be removed.  These blocks could be
-	 * written at any time, including while we are in the middle
-	 * of copying them.
-	 */
-	error = spa_reset_logs(spa);
+	if (error != 0)
+		return (error);
 
 	/*
 	 * We stop any initializing and TRIM that is currently in progress
 	 * but leave the state as "active". This will allow the process to
 	 * resume if the removal is canceled sometime later.
 	 */
+
+	spa_vdev_config_exit(spa, NULL, *txg, 0, FTAG);
+
 	vdev_initialize_stop_all(vd, VDEV_INITIALIZE_ACTIVE);
 	vdev_trim_stop_all(vd, VDEV_TRIM_ACTIVE);
 	vdev_autotrim_stop_wait(vd);
@@ -2162,13 +2342,11 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 	 * Things might have changed while the config lock was dropped
 	 * (e.g. space usage).  Check for errors again.
 	 */
-	if (error == 0)
-		error = spa_vdev_remove_top_check(vd);
+	error = spa_vdev_remove_top_check(vd);
 
 	if (error != 0) {
-		metaslab_group_activate(mg);
-		ASSERT(!vd->vdev_islog);
-		metaslab_group_activate(vd->vdev_log_mg);
+		if (set_noalloc)
+			vdev_activate(vd);
 		spa_async_request(spa, SPA_ASYNC_INITIALIZE_RESTART);
 		spa_async_request(spa, SPA_ASYNC_TRIM_RESTART);
 		spa_async_request(spa, SPA_ASYNC_AUTOTRIM_RESTART);
@@ -2206,7 +2384,8 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 	int error = 0, error_log;
 	boolean_t locked = MUTEX_HELD(&spa_namespace_lock);
 	sysevent_t *ev = NULL;
-	char *vd_type = NULL, *vd_path = NULL;
+	const char *vd_type = NULL;
+	char *vd_path = NULL;
 
 	ASSERT(spa_writeable(spa));
 
@@ -2235,7 +2414,7 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 		 * in this pool.
 		 */
 		if (vd == NULL || unspare) {
-			char *type;
+			const char *type;
 			boolean_t draid_spare = B_FALSE;
 
 			if (nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, &type)
@@ -2363,17 +2542,17 @@ spa_removal_get_stats(spa_t *spa, pool_removal_stat_t *prs)
 	return (0);
 }
 
-/* BEGIN CSTYLED */
 ZFS_MODULE_PARAM(zfs_vdev, zfs_, removal_ignore_errors, INT, ZMOD_RW,
 	"Ignore hard IO errors when removing device");
 
-ZFS_MODULE_PARAM(zfs_vdev, zfs_, remove_max_segment, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_vdev, zfs_, remove_max_segment, UINT, ZMOD_RW,
 	"Largest contiguous segment to allocate when removing device");
 
-ZFS_MODULE_PARAM(zfs_vdev, vdev_, removal_max_span, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_vdev, vdev_, removal_max_span, UINT, ZMOD_RW,
 	"Largest span of free chunks a remap segment can span");
 
-ZFS_MODULE_PARAM(zfs_vdev, zfs_, removal_suspend_progress, INT, ZMOD_RW,
+/* BEGIN CSTYLED */
+ZFS_MODULE_PARAM(zfs_vdev, zfs_, removal_suspend_progress, UINT, ZMOD_RW,
 	"Pause device removal after this many bytes are copied "
 	"(debug use only - causes removal to hang)");
 /* END CSTYLED */

@@ -32,26 +32,32 @@
 #include <linux/cpuhotplug.h>
 #endif
 
-int spl_taskq_thread_bind = 0;
+static int spl_taskq_thread_bind = 0;
 module_param(spl_taskq_thread_bind, int, 0644);
 MODULE_PARM_DESC(spl_taskq_thread_bind, "Bind taskq thread to CPU by default");
 
 
-int spl_taskq_thread_dynamic = 1;
+static int spl_taskq_thread_dynamic = 1;
 module_param(spl_taskq_thread_dynamic, int, 0444);
 MODULE_PARM_DESC(spl_taskq_thread_dynamic, "Allow dynamic taskq threads");
 
-int spl_taskq_thread_priority = 1;
+static int spl_taskq_thread_priority = 1;
 module_param(spl_taskq_thread_priority, int, 0644);
 MODULE_PARM_DESC(spl_taskq_thread_priority,
 	"Allow non-default priority for taskq threads");
 
-int spl_taskq_thread_sequential = 4;
-module_param(spl_taskq_thread_sequential, int, 0644);
+static uint_t spl_taskq_thread_sequential = 4;
+/* BEGIN CSTYLED */
+module_param(spl_taskq_thread_sequential, uint, 0644);
+/* END CSTYLED */
 MODULE_PARM_DESC(spl_taskq_thread_sequential,
 	"Create new taskq threads after N sequential tasks");
 
-/* Global system-wide dynamic task queue available for all consumers */
+/*
+ * Global system-wide dynamic task queue available for all consumers. This
+ * taskq is not intended for long-running tasks; instead, a dedicated taskq
+ * should be created.
+ */
 taskq_t *system_taskq;
 EXPORT_SYMBOL(system_taskq);
 /* Global dynamic task queue for long delay */
@@ -1042,7 +1048,6 @@ taskq_create(const char *name, int threads_arg, pri_t pri,
 
 	ASSERT(name != NULL);
 	ASSERT(minalloc >= 0);
-	ASSERT(maxalloc <= INT_MAX);
 	ASSERT(!(flags & (TASKQ_CPR_SAFE))); /* Unsupported */
 
 	/* Scale the number of threads using nthreads as a percentage */
@@ -1375,7 +1380,7 @@ spl_taskq_init(void)
 	system_taskq = taskq_create("spl_system_taskq", MAX(boot_ncpus, 64),
 	    maxclsyspri, boot_ncpus, INT_MAX, TASKQ_PREPOPULATE|TASKQ_DYNAMIC);
 	if (system_taskq == NULL)
-		return (1);
+		return (-ENOMEM);
 
 	system_delay_taskq = taskq_create("spl_delay_taskq", MAX(boot_ncpus, 4),
 	    maxclsyspri, boot_ncpus, INT_MAX, TASKQ_PREPOPULATE|TASKQ_DYNAMIC);
@@ -1384,7 +1389,7 @@ spl_taskq_init(void)
 		cpuhp_remove_multi_state(spl_taskq_cpuhp_state);
 #endif
 		taskq_destroy(system_taskq);
-		return (1);
+		return (-ENOMEM);
 	}
 
 	dynamic_taskq = taskq_create("spl_dynamic_taskq", 1,
@@ -1395,7 +1400,7 @@ spl_taskq_init(void)
 #endif
 		taskq_destroy(system_taskq);
 		taskq_destroy(system_delay_taskq);
-		return (1);
+		return (-ENOMEM);
 	}
 
 	/*

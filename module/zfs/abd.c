@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -109,7 +109,6 @@ void
 abd_verify(abd_t *abd)
 {
 #ifdef ZFS_DEBUG
-	ASSERT3U(abd->abd_size, >, 0);
 	ASSERT3U(abd->abd_size, <=, SPA_MAXBLOCKSIZE);
 	ASSERT3U(abd->abd_flags, ==, abd->abd_flags & (ABD_FLAG_LINEAR |
 	    ABD_FLAG_OWNER | ABD_FLAG_META | ABD_FLAG_MULTI_ZONE |
@@ -118,6 +117,7 @@ abd_verify(abd_t *abd)
 	IMPLY(abd->abd_parent != NULL, !(abd->abd_flags & ABD_FLAG_OWNER));
 	IMPLY(abd->abd_flags & ABD_FLAG_META, abd->abd_flags & ABD_FLAG_OWNER);
 	if (abd_is_linear(abd)) {
+		ASSERT3U(abd->abd_size, >, 0);
 		ASSERT3P(ABD_LINEAR_BUF(abd), !=, NULL);
 	} else if (abd_is_gang(abd)) {
 		uint_t child_sizes = 0;
@@ -130,6 +130,7 @@ abd_verify(abd_t *abd)
 		}
 		ASSERT3U(abd->abd_size, ==, child_sizes);
 	} else {
+		ASSERT3U(abd->abd_size, >, 0);
 		abd_verify_scatter(abd);
 	}
 #endif
@@ -369,7 +370,20 @@ abd_gang_add_gang(abd_t *pabd, abd_t *cabd, boolean_t free_on_free)
 		 * will retain all the free_on_free settings after being
 		 * added to the parents list.
 		 */
+#ifdef ZFS_DEBUG
+		/*
+		 * If cabd had abd_parent, we have to drop it here.  We can't
+		 * transfer it to pabd, nor we can clear abd_size leaving it.
+		 */
+		if (cabd->abd_parent != NULL) {
+			(void) zfs_refcount_remove_many(
+			    &cabd->abd_parent->abd_children,
+			    cabd->abd_size, cabd);
+			cabd->abd_parent = NULL;
+		}
+#endif
 		pabd->abd_size += cabd->abd_size;
+		cabd->abd_size = 0;
 		list_move_tail(&ABD_GANG(pabd).abd_gang_chain,
 		    &ABD_GANG(cabd).abd_gang_chain);
 		ASSERT(list_is_empty(&ABD_GANG(cabd).abd_gang_chain));
@@ -407,7 +421,6 @@ abd_gang_add(abd_t *pabd, abd_t *cabd, boolean_t free_on_free)
 	 */
 	if (abd_is_gang(cabd)) {
 		ASSERT(!list_link_active(&cabd->abd_gang_link));
-		ASSERT(!list_is_empty(&ABD_GANG(cabd).abd_gang_chain));
 		return (abd_gang_add_gang(pabd, cabd, free_on_free));
 	}
 	ASSERT(!abd_is_gang(cabd));
@@ -667,15 +680,15 @@ abd_return_buf(abd_t *abd, void *buf, size_t n)
 {
 	abd_verify(abd);
 	ASSERT3U(abd->abd_size, >=, n);
+#ifdef ZFS_DEBUG
+	(void) zfs_refcount_remove_many(&abd->abd_children, n, buf);
+#endif
 	if (abd_is_linear(abd)) {
 		ASSERT3P(buf, ==, abd_to_buf(abd));
 	} else {
 		ASSERT0(abd_cmp_buf(abd, buf, n));
 		zio_buf_free(buf, n);
 	}
-#ifdef ZFS_DEBUG
-	(void) zfs_refcount_remove_many(&abd->abd_children, n, buf);
-#endif
 }
 
 void
@@ -889,10 +902,10 @@ abd_copy_from_buf_off(abd_t *abd, const void *buf, size_t off, size_t size)
 	    &ba_ptr);
 }
 
-/*ARGSUSED*/
 static int
 abd_zero_off_cb(void *buf, size_t size, void *private)
 {
+	(void) private;
 	(void) memset(buf, 0, size);
 	return (0);
 }
@@ -967,10 +980,10 @@ abd_iterate_func2(abd_t *dabd, abd_t *sabd, size_t doff, size_t soff,
 	return (ret);
 }
 
-/*ARGSUSED*/
 static int
 abd_copy_off_cb(void *dbuf, void *sbuf, size_t size, void *private)
 {
+	(void) private;
 	(void) memcpy(dbuf, sbuf, size);
 	return (0);
 }
@@ -985,10 +998,10 @@ abd_copy_off(abd_t *dabd, abd_t *sabd, size_t doff, size_t soff, size_t size)
 	    abd_copy_off_cb, NULL);
 }
 
-/*ARGSUSED*/
 static int
 abd_cmp_cb(void *bufa, void *bufb, size_t size, void *private)
 {
+	(void) private;
 	return (memcmp(bufa, bufb, size));
 }
 
@@ -1066,10 +1079,10 @@ abd_raidz_gen_iterate(abd_t **cabds, abd_t *dabd,
 		switch (parity) {
 			case 3:
 				len = MIN(caiters[2].iter_mapsize, len);
-				fallthrough;
+				zfs_fallthrough;
 			case 2:
 				len = MIN(caiters[1].iter_mapsize, len);
-				fallthrough;
+				zfs_fallthrough;
 			case 1:
 				len = MIN(caiters[0].iter_mapsize, len);
 		}
@@ -1179,11 +1192,11 @@ abd_raidz_rec_iterate(abd_t **cabds, abd_t **tabds,
 			case 3:
 				len = MIN(xiters[2].iter_mapsize, len);
 				len = MIN(citers[2].iter_mapsize, len);
-				fallthrough;
+				zfs_fallthrough;
 			case 2:
 				len = MIN(xiters[1].iter_mapsize, len);
 				len = MIN(citers[1].iter_mapsize, len);
-				fallthrough;
+				zfs_fallthrough;
 			case 1:
 				len = MIN(xiters[0].iter_mapsize, len);
 				len = MIN(citers[0].iter_mapsize, len);
